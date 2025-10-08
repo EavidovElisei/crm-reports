@@ -118,10 +118,10 @@ def main():
         token = get_token()
         logging.info("✅ Токен получен из БД")
 
-        # Определяем период (текущий месяц с начала до конца)
+        # Определяем период (с 1 апреля до текущей даты)
         now = datetime.now()
         end_date = now.replace(hour=23, minute=59, second=59, microsecond=999999)
-        start_date = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        start_date = datetime(now.year, 4, 1, 0, 0, 0)
 
         logging.info(f"Период: {start_date.strftime('%d.%m.%Y')} - {end_date.strftime('%d.%m.%Y')}")
 
