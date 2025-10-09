@@ -2,6 +2,7 @@
 """
 Общие настройки для всех компонентов системы
 """
+import os
 
 # Конфигурация БД
 DB_CONFIG = {
@@ -27,22 +28,14 @@ CRM_CONFIG = {
 SCHEDULER_CONFIG = {
     'workers_dir': './workers',
     'interval': 15 * 60,  # 15 минут
-    'python_cmd': 'python'  # Изменено с python3 на python
+    'python_cmd': os.path.join(os.path.dirname(__file__), 'venv', 'bin', 'python')
 }
 
 # Конфигурация веб-сервера
 WEB_CONFIG = {
     'host': '0.0.0.0',
     'port': 8080,
-    'debug': True
-}
-
-# Конфигурация таблицы комментариев (укажите реальные значения вашей БД)
-COMMENTS_CONFIG = {
-    'table': 'request_comments',       # например: request_comments
-    'id_column': 'request_id',         # например: request_id или order_id
-    'date_column': 'sent_at',          # например: sent_at или created_at
-    'text_column': 'text'              # например: text или comment
+    'debug': False
 }
 
 # Справочники
@@ -51,10 +44,10 @@ MANAGER_NAMES = {
     61: 'Водопьянова Е.С.',
     104: 'Боярская Е.А.',
     281: 'Балашова Т.',
-    234: 'Овсянкина А.',
-    285: 'Врона Э.',
-    289: 'Зуева С.В.',
-    291: 'Борзова С.'
+    234: 'Овсянкина',
+    285: 'Врона', 
+    289: 'Зуева',
+    291: 'Борзова'
 }
 
 STATUS_LABELS = {
@@ -75,4 +68,15 @@ STATUS_CLASSES = {
     'KKT_LINKED': 'status-kkt-linked',
     'COMPLETED': 'status-completed',
     'CANCELED_BY_CLIENT': 'status-canceled'
+}
+# Конфигурация аутентификации для защищенных разделов
+AUTH_CONFIG = {
+    'secret_key': os.environ.get('CRM_REPORTS_SECRET_KEY', 'change_this_in_prod_please'),
+    'password': os.environ.get('CRM_REPORTS_SECURE_PASSWORD', '84924525797')
+}
+
+# Конфигурация комментариев
+COMMENTS_CONFIG = {
+    'enabled': True,
+    'max_length': 500
 }

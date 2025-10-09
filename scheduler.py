@@ -53,9 +53,15 @@ def run_worker(worker_path, python_cmd):
     try:
         logging.info(f"🚀 Запуск воркера: {worker_name}")
 
+        # Устанавливаем PYTHONPATH для корректного импорта config
+        env = os.environ.copy()
+        project_root = os.path.dirname(os.path.abspath(__file__))
+        env['PYTHONPATH'] = project_root
+        
         # Запускаем воркер без захвата вывода (позволяем ему логировать самостоятельно)
         result = subprocess.run(
             [python_cmd, worker_path],
+            env=env,
             timeout=300  # Таймаут 5 минут
         )
 

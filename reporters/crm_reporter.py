@@ -6,7 +6,7 @@ import psycopg2
 import json
 from datetime import datetime, timedelta
 from flask import Flask, request, Response
-from config import DB_CONFIG, MANAGER_NAMES, STATUS_LABELS, STATUS_CLASSES, CRM_CONFIG, COMMENTS_CONFIG
+from config import DB_CONFIG, MANAGER_NAMES, STATUS_LABELS, STATUS_CLASSES, CRM_CONFIG
 
 app = Flask(__name__)
 
@@ -90,278 +90,10 @@ def get_registration_status(order):
         return 'не зарегистрирован'
 
 
-def _parse_timestamp_to_datetime(value):
-    """Преобразование различных форматов времени в datetime."""
-    if value is None:
-        return None
-    try:
-        # Если число: может быть сек или мс
-        if isinstance(value, (int, float)):
-            # считаем, что значения больше 10^12 это миллисекунды
-            if value > 10**12:
-                return datetime.fromtimestamp(value / 1000)
-            # значения в секундах
-            return datetime.fromtimestamp(value)
-        # Если строка: пробуем ISO и общие форматы
-        if isinstance(value, str):
-            # ISO 8601
-            try:
-                return datetime.fromisoformat(value.replace('Z', '+00:00'))
-            except Exception:
-                pass
-            # Форматы типа 2025-09-30 12:34:56
-            for fmt in (
-                '%Y-%m-%d %H:%M:%S',
-                '%Y-%m-%d %H:%M',
-                '%Y-%m-%d',
-                '%d.%m.%Y %H:%M:%S',
-                '%d.%m.%Y %H:%M',
-                '%d.%m.%Y',
-            ):
-                try:
-                    return datetime.strptime(value, fmt)
-                except Exception:
-                    continue
-    except Exception:
-        return None
-    return None
-
-
-def get_last_comment_datetime(order):
-    """Определяет дату/время последнего комментария из структуры заказа.
-
-    Ищет комментарии в популярных местах: `comments`, `enrichment.comments`, `history`.
-    Поддерживает поля времени: `created`, `createdAt`, `date`, `sentAt`, `timestamp`.
-    """
-    if not order or not isinstance(order, dict):
-        return None
-
-    # 0) Явное поле из CRM списка: lastBankCommentDate (мс)
-    lbcd = order.get('lastBankCommentDate')
-    dt = _parse_timestamp_to_datetime(lbcd)
-    if dt:
-        return dt
-
-    candidate_lists = []
-    comments_root = order.get('comments')
-    if isinstance(comments_root, list):
-        candidate_lists.append(comments_root)
-
-    enrichment = order.get('enrichment')
-    if isinstance(enrichment, dict):
-        enr_comments = enrichment.get('comments')
-        if isinstance(enr_comments, list):
-            candidate_lists.append(enr_comments)
-
-    history = order.get('history')
-    if isinstance(history, list):
-        candidate_lists.append(history)
-
-    latest_dt = None
-    for lst in candidate_lists:
-        for item in lst:
-            if not isinstance(item, dict):
-                continue
-            ts_value = (
-                item.get('created')
-                or item.get('createdAt')
-                or item.get('date')
-                or item.get('sentAt')
-                or item.get('timestamp')
-            )
-            dt = _parse_timestamp_to_datetime(ts_value)
-            if dt and (latest_dt is None or dt > latest_dt):
-                latest_dt = dt
-
-    return latest_dt
-
-
-def get_last_comment_text(order):
-    """Возвращает строку даты последнего комментария или '—'."""
-    dt = get_last_comment_datetime(order)
-    return dt.strftime('%d.%m.%Y %H:%M') if dt else '—'
-
-
-def get_last_comment_datetime_from_db(order_id):
-    """Читает из БД дату последнего комментария для заявки.
-
-    Пытается найти таблицу комментариев среди распространенных вариантов
-    и берет максимальную дату по полям времени.
-    """
-    if not order_id:
-        return None
-
-    conn = None
-    try:
-        conn = psycopg2.connect(**DB_CONFIG)
-        cur = conn.cursor()
-
-        # Сначала используем конфигурацию
-        candidates = [
-            (
-                COMMENTS_CONFIG.get('table'),
-                COMMENTS_CONFIG.get('id_column'),
-                COMMENTS_CONFIG.get('date_column')
-            )
-        ]
-        # Затем запасные варианты
-        candidates += [
-            ('request_comments', 'request_id', 'sent_at'),
-            ('request_comments', 'request_id', 'created_at'),
-            ('comments', 'order_id', 'sent_at'),
-            ('comments', 'request_id', 'sent_at'),
-            ('comments', 'order_id', 'created_at'),
-            ('order_comments', 'order_id', 'created_at'),
-            ('order_comments', 'request_id', 'created_at'),
-        ]
-
-        latest_dt = None
-
-        for table, id_col, time_col in candidates:
-            try:
-                # Проверяем, что таблица существует с нужными колонками
-                cur.execute(
-                    f"""
-                    SELECT to_regclass(%s) IS NOT NULL
-                """,
-                    (table,)
-                )
-                exists = cur.fetchone()[0]
-                if not exists:
-                    continue
-
-                # Проверка наличия нужных колонок
-                cur.execute(
-                    """
-                    SELECT COUNT(*)
-                    FROM information_schema.columns
-                    WHERE table_name = %s AND column_name = %s
-                    """,
-                    (table, id_col)
-                )
-                if cur.fetchone()[0] == 0:
-                    continue
-
-                cur.execute(
-                    """
-                    SELECT COUNT(*)
-                    FROM information_schema.columns
-                    WHERE table_name = %s AND column_name = %s
-                    """,
-                    (table, time_col)
-                )
-                if cur.fetchone()[0] == 0:
-                    continue
-
-                # Берем максимальную дату
-                cur.execute(
-                    f"""
-                    SELECT MAX({time_col})
-                    FROM {table}
-                    WHERE {id_col} = %s
-                    """,
-                    (order_id,)
-                )
-                row = cur.fetchone()
-                if row and row[0]:
-                    dt = row[0]
-                    if isinstance(dt, (int, float)):
-                        dt = _parse_timestamp_to_datetime(dt)
-                    # Если строка даты
-                    if isinstance(dt, str):
-                        dt = _parse_timestamp_to_datetime(dt)
-
-                    if dt and (latest_dt is None or dt > latest_dt):
-                        latest_dt = dt
-
-            except Exception:
-                # Переходим к следующему кандидату
-                continue
-
-        cur.close()
-        conn.close()
-        return latest_dt
-    except Exception:
-        if conn:
-            try:
-                conn.close()
-            except Exception:
-                pass
-        return None
-
-
-def get_last_comment_text_with_db_fallback(order):
-    """Возвращает дату последнего комментария, сначала из JSON, иначе из БД."""
-    dt = get_last_comment_datetime(order)
-    if not dt:
-        order_id = order.get('id') if isinstance(order, dict) else None
-        dt = get_last_comment_datetime_from_db(order_id)
-    return dt.strftime('%d.%m.%Y %H:%M') if dt else '—'
-
-
-def get_last_comment_text_value(order):
-    """Возвращает текст последнего комментария из JSON (lastBankComment) или из БД."""
-    if isinstance(order, dict):
-        txt = order.get('lastBankComment')
-        if isinstance(txt, str) and txt.strip():
-            return txt.strip()
-
-    order_id = order.get('id') if isinstance(order, dict) else None
-    if not order_id:
-        return '—'
-
-    conn = None
-    try:
-        conn = psycopg2.connect(**DB_CONFIG)
-        cur = conn.cursor()
-
-        table = COMMENTS_CONFIG.get('table')
-        id_col = COMMENTS_CONFIG.get('id_column')
-        date_col = COMMENTS_CONFIG.get('date_column')
-        text_col = COMMENTS_CONFIG.get('text_column')
-
-        if not all([table, id_col, date_col, text_col]):
-            cur.close()
-            conn.close()
-            return '—'
-
-        cur.execute(
-            f"""
-            SELECT {text_col}
-            FROM {table}
-            WHERE {id_col} = %s
-            ORDER BY {date_col} DESC
-            LIMIT 1
-            """,
-            (order_id,)
-        )
-        row = cur.fetchone()
-        cur.close()
-        conn.close()
-        if row and isinstance(row[0], str) and row[0].strip():
-            return row[0].strip()
-    except Exception:
-        if conn:
-            try:
-                conn.close()
-            except Exception:
-                pass
-    return '—'
-
-
 def analyze_data(data):
     """Анализ данных"""
     if not data:
-        return {
-            'total_orders': 0,
-            'paid_orders': 0,
-            'invoiced_orders': 0,
-            'conversion_rate': 0,
-            'status_stats': {},
-            'manager_stats': {},
-            'daily_stats': {},
-            'raw_data': []
-        }
+        return {}
 
     # Фильтруем валидные записи
     valid_data = [order for order in data if order and isinstance(order, dict)]
@@ -477,10 +209,6 @@ def generate_html_report(analytics, start_date, end_date):
 
         # Получаем статус регистрации
         registration_status = get_registration_status(order)
-        # Получаем дату последнего комментария
-        last_comment = get_last_comment_text_with_db_fallback(order)
-        # Получаем текст последнего комментария
-        last_comment_text = get_last_comment_text_value(order)
 
         table_rows += f"""
                         <tr class="clickable-row" onclick="openRequest({order_id})" title="Кликните для открытия заявки">
@@ -491,8 +219,6 @@ def generate_html_report(analytics, start_date, end_date):
                             <td><span class="status-badge {status_class}">{status_text}</span></td>
                             <td>{registration_status}</td>
                             <td>{manager_name}</td>
-                            <td>{last_comment_text}</td>
-                            <td>{last_comment}</td>
                             <td>{created_date.strftime('%d.%m.%Y %H:%M')}</td>
                         </tr>
         """
@@ -826,8 +552,6 @@ def generate_html_report(analytics, start_date, end_date):
                             <th>Статус</th>
                             <th>Регистрация</th>
                             <th>Менеджер</th>
-                            <th>Последний комментарий</th>
-                            <th>Дата последнего комментария</th>
                             <th>Дата создания</th>
                         </tr>
                     </thead>

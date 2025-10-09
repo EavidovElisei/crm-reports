@@ -2,13 +2,10 @@
 """
 Воркер сбора данных - получает данные из CRM и сохраняет в БД
 """
-import sys
-import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 import psycopg2
 import requests
 import logging
+import sys
 from datetime import datetime, timedelta
 from psycopg2.extras import Json
 from config import DB_CONFIG, CRM_CONFIG
@@ -118,10 +115,9 @@ def main():
         token = get_token()
         logging.info("✅ Токен получен из БД")
 
-        # Определяем период (с 1 апреля до текущей даты)
-        now = datetime.now()
-        end_date = now.replace(hour=23, minute=59, second=59, microsecond=999999)
-        start_date = datetime(now.year, 4, 1, 0, 0, 0)
+        # Определяем период (с 1 апреля текущего года до текущего момента)
+        end_date = datetime.now()
+        start_date = datetime(end_date.year, 4, 1, 0, 0, 0)
 
         logging.info(f"Период: {start_date.strftime('%d.%m.%Y')} - {end_date.strftime('%d.%m.%Y')}")
 

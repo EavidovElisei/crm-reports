@@ -9,6 +9,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import psycopg2
 import requests
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from psycopg2.extras import Json
 from config import DB_CONFIG, CRM_CONFIG
@@ -17,7 +18,9 @@ from config import DB_CONFIG, CRM_CONFIG
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - ENRICHMENT - %(message)s')
 
 # Интервал обновления данных в часах
-UPDATE_INTERVAL_HOURS = 3
+UPDATE_INTERVAL_HOURS = 0.5
+# Параллелизм: можно управлять через переменную окружения ENRICH_MAX_WORKERS
+MAX_WORKERS = int(os.environ.get('ENRICH_MAX_WORKERS', '12'))
 
 
 def get_token():
@@ -106,38 +109,24 @@ def fetch_registration_info(token, request_id):
         return None
 
 
-def fetch_appointment_date(token, request_id):
-    """Получение даты записи на регистрацию"""
-    url = f"{CRM_CONFIG['base_url']}/admin-api/protected/boxed_kkm/install/yclients/date/{request_id}"
+def _extract_appointment_from_install(install_data):
+    """Извлекает дату записи на регистрацию из install-ответа.3 
 
-    headers = {
-        'Authorization': token,
-        'Content-Type': 'application/json',
-        'Accept': 'application/json'
-    }
-
-    try:
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
-
-        # Проверяем, что ответ не пустой (пустой ответ = нет записи)
-        if not response.text.strip():
-            return None
-
-        # Ответ может быть просто числом (timestamp) или JSON
-        try:
-            return response.json()
-        except ValueError:
-            # Если не JSON, пробуем как обычное число
-            try:
-                return int(response.text.strip())
-            except ValueError:
-                logging.warning(f"Неожиданный формат ответа для даты записи заявки {request_id}: {response.text}")
-                return None
-
-    except requests.exceptions.RequestException as e:
-        logging.warning(f"Ошибка получения даты записи для заявки {request_id}: {e}")
+    Поддерживает поле 'yClientRecordDate' (мс) если присутствует.
+    Возвращает timestamp в мс или None.
+    """
+    if not isinstance(install_data, dict):
         return None
+    value = install_data.get('yClientRecordDate')
+    # Значение уже в мс по контракту; просто вернем, если это int/float/строка-число
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
 
 
 def fetch_order_info(token, order_id):
@@ -172,7 +161,7 @@ def enrich_request_data(token, request_id, current_data):
         "enriched_at": int(datetime.now().timestamp() * 1000)
     }
 
-    # 1. Получаем данные установки для извлечения ID заказов
+    # 1. Получаем данные установки для извлечения ID заказов и актуального статуса/дат
     install_data = fetch_install_data(token, request_id)
     order_id = None
     additional_order_id = None
@@ -180,6 +169,14 @@ def enrich_request_data(token, request_id, current_data):
     if install_data:
         order_id = install_data.get('orderId')
         additional_order_id = install_data.get('additionalOrderId')
+        # Обновляем статус заявки из install-ответа, если он присутствует
+        install_status = install_data.get('status')
+        if install_status and isinstance(current_data, dict):
+            current_data['status'] = install_status
+        # Извлекаем дату записи на регистрацию, если доступна
+        appointment_from_install = _extract_appointment_from_install(install_data)
+        if appointment_from_install:
+            enrichment["registration_appointment_date"] = appointment_from_install
 
     # 2. Получаем информацию о регистрации
     registration_info = fetch_registration_info(token, request_id)
@@ -191,10 +188,7 @@ def enrich_request_data(token, request_id, current_data):
         else:
             enrichment["fns_registration_status"] = "not_registered"
 
-    # 3. Получаем дату записи на регистрацию
-    appointment_date = fetch_appointment_date(token, request_id)
-    if appointment_date:
-        enrichment["registration_appointment_date"] = appointment_date
+    # 3. Дата записи уже извлечена из install (если доступна)
 
     # 4. Получаем информацию об основном заказе
     if order_id:
@@ -289,25 +283,28 @@ def main():
         enriched_count = 0
         error_count = 0
 
-        for request_id, current_data in requests_data:
-            try:
-                logging.info(f"🔄 Обогащение заявки {request_id}")
+        def process_one(item):
+            request_id, current_data = item
+            logging.info(f"🔄 Обогащение заявки {request_id}")
+            enriched_data = enrich_request_data(token, request_id, current_data)
+            save_enriched_data(request_id, enriched_data)
+            return request_id
 
-                # Обогащаем данные
-                enriched_data = enrich_request_data(token, request_id, current_data)
+        # Параллельная обработка заявок
+        total = len(requests_data)
+        logging.info(f"🧵 Запуск параллельной обработки: workers={MAX_WORKERS}, всего заявок={total}")
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            futures = {executor.submit(process_one, item): item[0] for item in requests_data}
+            for future in as_completed(futures):
+                rid = futures[future]
+                try:
+                    _ = future.result()
+                    enriched_count += 1
+                except Exception as e:
+                    error_count += 1
+                    logging.error(f"❌ Ошибка обогащения заявки {rid}: {e}")
 
-                # Сохраняем в БД
-                save_enriched_data(request_id, enriched_data)
-
-                enriched_count += 1
-                logging.info(f"✅ Заявка {request_id} обогащена")
-
-            except Exception as e:
-                error_count += 1
-                logging.error(f"❌ Ошибка обогащения заявки {request_id}: {e}")
-                continue
-
-        logging.info(f"🎉 Обогащение завершено: {enriched_count} успешно, {error_count} ошибок")
+        logging.info(f"🎉 Обогащение завершено: {enriched_count} успешно, {error_count} ошибок (всего {total})")
         return True
 
     except Exception as e:
