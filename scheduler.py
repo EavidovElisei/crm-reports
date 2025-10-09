@@ -53,10 +53,16 @@ def run_worker(worker_path, python_cmd):
     try:
         logging.info(f"🚀 Запуск воркера: {worker_name}")
 
-        # Устанавливаем PYTHONPATH для корректного импорта config
+        # Настраиваем окружение для воркера
         env = os.environ.copy()
         project_root = os.path.dirname(os.path.abspath(__file__))
         env['PYTHONPATH'] = project_root
+        
+        # Настраиваем прокси для доступа к внешним API
+        if 'HTTP_PROXY' not in env:
+            env['HTTP_PROXY'] = 'http://192.168.8.8:3128'
+        if 'HTTPS_PROXY' not in env:
+            env['HTTPS_PROXY'] = 'http://192.168.8.8:3128'
         
         # Запускаем воркер без захвата вывода (позволяем ему логировать самостоятельно)
         result = subprocess.run(

@@ -20,7 +20,7 @@ CRM_CONFIG = {
     'admin_url': 'https://kassa.bifit.com/admin/#/main/alfabank_request/list',
     'client_id': 'cashdesk-rest-client',
     'client_secret': 'cashdesk-rest-client',
-    'manager_ids': [104, 61, 22, 281, 234, 285, 289, 291],
+    'manager_ids': [104, 61, 22, 281],
     'statuses': ['NEW', 'DRAFT', 'INCOME_CREATED', 'INCOME_PAID', 'KKT_LINKED', 'COMPLETED', 'CANCELED_BY_CLIENT']
 }
 
@@ -28,7 +28,7 @@ CRM_CONFIG = {
 SCHEDULER_CONFIG = {
     'workers_dir': './workers',
     'interval': 15 * 60,  # 15 минут
-    'python_cmd': os.path.join(os.path.dirname(__file__), 'venv', 'bin', 'python')
+    'python_cmd': 'python'  # Изменено с python3 на python
 }
 
 # Конфигурация веб-сервера
