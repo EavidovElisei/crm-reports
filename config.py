@@ -20,7 +20,8 @@ CRM_CONFIG = {
     'admin_url': 'https://kassa.bifit.com/admin/#/main/alfabank_request/list',
     'client_id': 'cashdesk-rest-client',
     'client_secret': 'cashdesk-rest-client',
-    'manager_ids': [104, 61, 22, 281],
+    # Актуальный список ID менеджеров
+    'manager_ids': [307, 22, 281, 104, 304, 291, 285, 234, 61],
     'statuses': ['NEW', 'DRAFT', 'INCOME_CREATED', 'INCOME_PAID', 'KKT_LINKED', 'COMPLETED', 'CANCELED_BY_CLIENT']
 }
 
@@ -40,14 +41,15 @@ WEB_CONFIG = {
 
 # Справочники
 MANAGER_NAMES = {
-    22: 'Костикова А.М.',
-    61: 'Водопьянова Е.С.',
-    104: 'Боярская Е.А.',
-    281: 'Балашова Т.',
+    307: 'Тимонина',
+    22: 'Костикова',
+    281: 'Балашова',
+    104: 'Боярская',
+    304: 'Ганиева',
+    291: 'Борзова',
+    285: 'Врона',
     234: 'Овсянкина',
-    285: 'Врона', 
-    289: 'Зуева',
-    291: 'Борзова'
+    61: 'Водопьянова'
 }
 
 STATUS_LABELS = {
