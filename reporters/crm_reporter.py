@@ -99,14 +99,26 @@ def analyze_data(data):
     valid_data = [order for order in data if order and isinstance(order, dict)]
 
     total_orders = len(valid_data)
-    paid_and_processed_orders = len([order for order in valid_data
-                                     if order.get('status') in ['INCOME_PAID', 'KKT_LINKED', 'COMPLETED']])
+    paid_and_processed_orders = len([
+        order for order in valid_data
+        if order.get('status') in ['INCOME_PAID', 'INCOME_PARTIALLY_PAID', 'KKT_LINKED', 'COMPLETED']
+    ])
     invoiced_orders = len([order for order in valid_data
                            if order.get('status') == 'INCOME_CREATED'])
     conversion_rate = (paid_and_processed_orders / total_orders * 100) if total_orders > 0 else 0
 
     # Статистика по статусам
-    status_order = ['DRAFT', 'NEW', 'INCOME_CREATED', 'INCOME_PAID', 'KKT_LINKED', 'COMPLETED', 'CANCELED_BY_CLIENT']
+    status_order = [
+        'DRAFT',
+        'NEW',
+        'INCOME_CREATED',
+        'INCOME_PAID',
+        'INCOME_PARTIALLY_PAID',
+        'KKT_LINKED',
+        'COMPLETED',
+        'REFUND',
+        'CANCELED_BY_CLIENT'
+    ]
     status_stats = {}
     for status in status_order:
         status_stats[status] = len([order for order in valid_data if order.get('status') == status])
@@ -150,7 +162,17 @@ def generate_html_report(analytics, start_date, end_date):
     """Генерация HTML отчета с современными стилями"""
     # Подготовка данных для графиков
     status_chart_data = []
-    for status in ['DRAFT', 'NEW', 'INCOME_CREATED', 'INCOME_PAID', 'KKT_LINKED', 'COMPLETED', 'CANCELED_BY_CLIENT']:
+    for status in [
+        'DRAFT',
+        'NEW',
+        'INCOME_CREATED',
+        'INCOME_PAID',
+        'INCOME_PARTIALLY_PAID',
+        'KKT_LINKED',
+        'COMPLETED',
+        'REFUND',
+        'CANCELED_BY_CLIENT'
+    ]:
         if status in analytics['status_stats'] and analytics['status_stats'][status] > 0:
             status_chart_data.append({
                 'label': STATUS_LABELS.get(status, status),
@@ -458,8 +480,10 @@ def generate_html_report(analytics, start_date, end_date):
         .status-draft {{ background: #f3e5f5; color: #7b1fa2; }}
         .status-income-created {{ background: #fff3e0; color: #f57c00; }}
         .status-income-paid {{ background: #e8f5e8; color: #388e3c; }}
+        .status-income-partially-paid {{ background: #fff8e1; color: #f9a825; }}
         .status-kkt-linked {{ background: #e8f5e8; color: #2e7d32; }}
         .status-completed {{ background: #e8f5e8; color: #2e7d32; }}
+        .status-refund {{ background: #e3f2fd; color: #1565c0; }}
         .status-canceled {{ background: #ffebee; color: #d32f2f; }}
 
         @media print {{

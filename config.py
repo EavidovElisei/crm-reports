@@ -22,7 +22,17 @@ CRM_CONFIG = {
     'client_secret': 'cashdesk-rest-client',
     # Актуальный список ID менеджеров
     'manager_ids': [307, 22, 281, 104, 304, 291, 285, 234, 61],
-    'statuses': ['NEW', 'DRAFT', 'INCOME_CREATED', 'INCOME_PAID', 'KKT_LINKED', 'COMPLETED', 'CANCELED_BY_CLIENT']
+    'statuses': [
+        'NEW',
+        'DRAFT',
+        'INCOME_CREATED',
+        'INCOME_PAID',
+        'INCOME_PARTIALLY_PAID',
+        'KKT_LINKED',
+        'COMPLETED',
+        'REFUND',
+        'CANCELED_BY_CLIENT'
+    ]
 }
 
 # Конфигурация планировщика
@@ -57,8 +67,10 @@ STATUS_LABELS = {
     'NEW': 'Новая',
     'INCOME_CREATED': 'Счет создан',
     'INCOME_PAID': 'Счет оплачен',
+    'INCOME_PARTIALLY_PAID': 'Частично оплачен',
     'KKT_LINKED': 'В работе',
     'COMPLETED': 'Завершена',
+    'REFUND': 'Возвращен',
     'CANCELED_BY_CLIENT': 'Отменена'
 }
 
@@ -67,8 +79,10 @@ STATUS_CLASSES = {
     'NEW': 'status-new',
     'INCOME_CREATED': 'status-income-created',
     'INCOME_PAID': 'status-income-paid',
+    'INCOME_PARTIALLY_PAID': 'status-income-partially-paid',
     'KKT_LINKED': 'status-kkt-linked',
     'COMPLETED': 'status-completed',
+    'REFUND': 'status-refund',
     'CANCELED_BY_CLIENT': 'status-canceled'
 }
 # Конфигурация аутентификации для защищенных разделов
