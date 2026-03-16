@@ -115,9 +115,15 @@ def main():
         token = get_token()
         logging.info("✅ Токен получен из БД")
 
-        # Определяем период (с 1 апреля текущего года до текущего момента)
+        # Определяем период: с 1 апреля «отчётного года» до текущего момента.
+        # Если сейчас до апреля (янв–мар), берём 1 апреля прошлого года,
+        # иначе — 1 апреля текущего года. Так период всегда начинается в прошлом.
         end_date = datetime.now()
-        start_date = datetime(end_date.year, 4, 1, 0, 0, 0)
+        if end_date.month >= 4:
+            period_year = end_date.year
+        else:
+            period_year = end_date.year - 1
+        start_date = datetime(period_year, 4, 1, 0, 0, 0)
 
         logging.info(f"Период: {start_date.strftime('%d.%m.%Y')} - {end_date.strftime('%d.%m.%Y')}")
 
