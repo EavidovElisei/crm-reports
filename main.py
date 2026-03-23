@@ -4,6 +4,11 @@
 """
 import os
 import sys
+
+# Корень проекта в path — репортеры импортируют last_comment и др. из корня
+_ROOT = os.path.dirname(os.path.abspath(__file__))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
 import logging
 import threading
 import importlib.util

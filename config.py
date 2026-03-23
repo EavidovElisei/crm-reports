@@ -18,6 +18,11 @@ CRM_CONFIG = {
     'api_url': 'https://kassa.bifit.com/admin-api/protected/boxed_kkm/install/list/read',
     'base_url': 'https://kassa.bifit.com',
     'admin_url': 'https://kassa.bifit.com/admin/#/main/alfabank_request/list',
+    # Аналитика admin-api (тот же хост, что и CRM; переопределите через CRM_ANALYTICS_URL при необходимости)
+    'analytics_url': os.environ.get(
+        'CRM_ANALYTICS_URL',
+        'https://kassa.bifit.com/admin-api/protected/boxed_kkm/analytics',
+    ),
     'client_id': 'cashdesk-rest-client',
     'client_secret': 'cashdesk-rest-client',
     # Актуальный список ID менеджеров
@@ -35,17 +40,29 @@ CRM_CONFIG = {
     ]
 }
 
+# Интервал синхронизации с CRM (секунды). Переменная CRM_REPORTS_SYNC_INTERVAL_SEC переопределяет значение.
+_SYNC_INTERVAL = int(os.environ.get('CRM_REPORTS_SYNC_INTERVAL_SEC', str(5 * 60)))
+
 # Конфигурация планировщика
 SCHEDULER_CONFIG = {
     'workers_dir': './workers',
-    'interval': 15 * 60,  # 15 минут
-    'python_cmd': 'python'  # Изменено с python3 на python
+    'interval': _SYNC_INTERVAL,
+    'python_cmd': 'python',  # при запуске из main/scheduler подставляется sys.executable
+    # Важно: сначала токен, потом заявки, обогащение, аналитика
+    'worker_order': [
+        'auth_worker.py',
+        'data_worker.py',
+        'enrichment_worker.py',
+        'analytics_worker.py',
+    ],
 }
 
 # Конфигурация веб-сервера
 WEB_CONFIG = {
-    'host': '0.0.0.0',
-    'port': 8080,
+    # Для локальной разработки безопаснее слушать только localhost
+    'host': '127.0.0.1',
+    # Меняем порт, чтобы не конфликтовать с другими сервисами
+    'port': 5000,
     'debug': False
 }
 
@@ -96,3 +113,9 @@ COMMENTS_CONFIG = {
     'enabled': True,
     'max_length': 500
 }
+
+# Переменные окружения (справка):
+# CRM_ANALYTICS_URL — URL admin-api аналитики (по умолчанию тот же хост, что CRM).
+# CRM_REPORTS_SYNC_INTERVAL_SEC — интервал авто-синхронизации воркеров, сек (по умолчанию 300).
+# CRM_REPORTS_SYNC_SECRET — если задан, ручная синхронизация /sync и /api/sync требует ?secret= или X-Sync-Secret.
+# CRM_HTTP_PROXY / CRM_HTTPS_PROXY — прокси для воркеров (планировщик подставит в subprocess).

@@ -2,101 +2,114 @@
 """
 Репортер - генерирует HTML отчеты из данных БД
 """
-import psycopg2
+import html as html_module
+import io
 import json
+import logging
+import psycopg2  # pyright: ignore[reportMissingModuleSource]
 from datetime import datetime, timedelta
-from flask import Flask, request, Response
+from flask import Flask, request, Response  # pyright: ignore[reportMissingImports]
 from config import DB_CONFIG, MANAGER_NAMES, STATUS_LABELS, STATUS_CLASSES, CRM_CONFIG
+from last_comment import get_last_comment_for_display, get_last_comment_plain
 
 app = Flask(__name__)
+logger = logging.getLogger(__name__)
 
 
 def get_requests_from_db(start_date, end_date):
-    """Получение заявок из БД за период"""
+    """Заявки, созданные в CRM в выбранном периоде (по дате создания в БД = дата заявки из CRM)."""
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
 
-    # Используем >= для start_date и <= для end_date для включения всего периода
-    cur.execute("""
-        SELECT data FROM requests 
+    cur.execute(
+        """
+        SELECT data FROM requests
         WHERE created_at >= %s AND created_at <= %s
         ORDER BY created_at DESC
-    """, (start_date, end_date))
+        """,
+        (start_date, end_date),
+    )
 
     results = cur.fetchall()
     cur.close()
     conn.close()
 
-    # Фильтруем None значения и проверяем что данные являются словарем
+    # Фильтруем None; jsonb может прийти как dict или как строка JSON
     valid_data = []
     for row in results:
-        if row[0] is not None and isinstance(row[0], dict):
-            valid_data.append(row[0])
+        raw = row[0]
+        if raw is None:
+            continue
+        if isinstance(raw, dict):
+            valid_data.append(raw)
+        elif isinstance(raw, str):
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    valid_data.append(parsed)
+            except (json.JSONDecodeError, TypeError):
+                continue
 
     return valid_data
 
 
-def get_invoice_amount(order):
-    """Получение суммы выставленных счетов"""
-    if not order or not isinstance(order, dict):
-        return None
-
-    enrichment = order.get('enrichment', {})
-    if not enrichment or not isinstance(enrichment, dict):
-        return None
-
-    main_order = enrichment.get('main_order', {})
-    additional_order = enrichment.get('additional_order', {})
-
-    # Безопасное получение сумм с проверкой на None
-    main_amount = 0
-    if isinstance(main_order, dict):
-        main_amount_value = main_order.get('amount')
-        if main_amount_value is not None and isinstance(main_amount_value, (int, float)):
-            main_amount = main_amount_value
-
-    additional_amount = 0
-    if isinstance(additional_order, dict):
-        additional_amount_value = additional_order.get('amount')
-        if additional_amount_value is not None and isinstance(additional_amount_value, (int, float)):
-            additional_amount = additional_amount_value
-
-    total_amount = main_amount + additional_amount
-    return int(total_amount) if total_amount > 0 else None
+def get_last_db_update_in_period(start_date, end_date):
+    """Максимальное updated_at среди заявок, созданных в периоде (насколько свежи данные в БД)."""
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT MAX(updated_at) FROM requests
+            WHERE created_at >= %s AND created_at <= %s
+            """,
+            (start_date, end_date),
+        )
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        if row and row[0]:
+            return row[0]
+    except Exception:
+        logger.debug("get_last_db_update_in_period failed", exc_info=True)
+    return None
 
 
-def get_registration_status(order):
-    """Получение статуса регистрации"""
-    if not order or not isinstance(order, dict):
-        return 'не зарегистрирован'
-
-    enrichment = order.get('enrichment', {})
-    if not enrichment or not isinstance(enrichment, dict):
-        return 'не зарегистрирован'
-
-    fns_status = enrichment.get('fns_registration_status')
-    appointment_date = enrichment.get('registration_appointment_date')
-
-    if fns_status == 'registered':
-        return 'зарегистрирован'
-    elif appointment_date:
-        try:
-            # Конвертируем timestamp в дату
-            date_obj = datetime.fromtimestamp(appointment_date / 1000)
-            return f'записан на {date_obj.strftime("%d.%m.%Y")}'
-        except (ValueError, TypeError, OSError):
-            return 'не зарегистрирован'
-    else:
-        return 'не зарегистрирован'
+def _empty_analytics_result():
+    """Та же структура, что и у analyze_data при наличии данных (нужна при пустом периоде)."""
+    status_order = [
+        'DRAFT',
+        'NEW',
+        'INCOME_CREATED',
+        'INCOME_PAID',
+        'INCOME_PARTIALLY_PAID',
+        'KKT_LINKED',
+        'COMPLETED',
+        'REFUND',
+        'CANCELED_BY_CLIENT',
+    ]
+    return {
+        'total_orders': 0,
+        'paid_orders': 0,
+        'invoiced_orders': 0,
+        'conversion_rate': 0.0,
+        'status_stats': {s: 0 for s in status_order},
+        'manager_stats': {},
+        'daily_stats': {},
+        'raw_data': [],
+    }
 
 
 def analyze_data(data):
     """Анализ данных"""
     if not data:
-        return {}
+        return _empty_analytics_result()
 
     # Фильтруем валидные записи
     valid_data = [order for order in data if order and isinstance(order, dict)]
+
+    if not valid_data:
+        return _empty_analytics_result()
 
     total_orders = len(valid_data)
     paid_and_processed_orders = len([
@@ -158,7 +171,124 @@ def truncate_text(text, max_length):
     return text[:max_length] + '...' if len(text) > max_length else text
 
 
-def generate_html_report(analytics, start_date, end_date):
+def parse_report_period():
+    """Период отчёта из query: display_* и границы для БД."""
+    start_param = request.args.get('start')
+    end_param = request.args.get('end')
+
+    if start_param and end_param:
+        start_date = datetime.strptime(start_param, '%Y-%m-%d')
+        end_date = datetime.strptime(end_param, '%Y-%m-%d')
+        display_start = start_date
+        display_end = end_date
+        search_start = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
+        search_end = end_date.replace(hour=23, minute=59, second=59, microsecond=999999)
+    else:
+        now = datetime.now()
+        display_start = now.replace(day=1)
+        display_end = now
+        search_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        search_end = now.replace(hour=23, minute=59, second=59, microsecond=999999)
+
+    return display_start, display_end, search_start, search_end
+
+
+def build_xlsx_report_bytes(raw_orders, display_start, display_end):
+    """XLSX с теми же колонками, что таблица отчёта (+ ID заявки)."""
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, Alignment
+        from openpyxl.utils import get_column_letter
+    except ImportError as e:
+        raise RuntimeError(
+            "Не установлен openpyxl. Выполните: pip install openpyxl"
+        ) from e
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Заявки"
+
+    title = (
+        f"CRM отчёт — {display_start.strftime('%d.%m.%Y')} – "
+        f"{display_end.strftime('%d.%m.%Y')}"
+    )
+    ws.append([title])
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=8)
+    ws.cell(1, 1).font = Font(bold=True, size=12)
+    ws.append([])
+
+    headers = [
+        "№",
+        "ID заявки",
+        "Организация",
+        "ИНН",
+        "Статус",
+        "Комментарий для банка",
+        "Менеджер",
+        "Дата создания",
+    ]
+    ws.append(headers)
+    header_row = ws.max_row
+    for c in range(1, 9):
+        cell = ws.cell(header_row, c)
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(vertical="center", wrap_text=True)
+
+    widths = (5, 12, 42, 14, 22, 48, 18, 18)
+    for i, w in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+
+    row_num = 0
+    for order in raw_orders:
+        if not order or not isinstance(order, dict):
+            continue
+        row_num += 1
+        try:
+            created_ts = order.get('created', 0)
+            created_date = (
+                datetime.fromtimestamp(created_ts / 1000)
+                if created_ts
+                else datetime.now()
+            )
+        except (ValueError, TypeError, OSError):
+            created_date = datetime.now()
+
+        status = order.get('status', 'UNKNOWN')
+        status_text = STATUS_LABELS.get(status, status)
+        manager_id = order.get('callCenterManagerId', 'unknown')
+        manager_name = MANAGER_NAMES.get(manager_id, f"Менеджер {manager_id}")
+        oid = order.get('id', '')
+        org_name = order.get('organizationName', 'Не указано')
+        org_inn = order.get('organizationInn', 'Не указан')
+
+        ws.append(
+            [
+                row_num,
+                oid,
+                org_name,
+                org_inn,
+                status_text,
+                get_last_comment_plain(order),
+                manager_name,
+                created_date.strftime('%d.%m.%Y %H:%M'),
+            ]
+        )
+
+    last_data_row = ws.max_row
+    if last_data_row > header_row:
+        ws.auto_filter.ref = f"A{header_row}:H{last_data_row}"
+
+    for r in range(header_row + 1, last_data_row + 1):
+        for c in (3, 6):
+            ws.cell(r, c).alignment = Alignment(wrap_text=True, vertical="top")
+
+    bio = io.BytesIO()
+    wb.save(bio)
+    bio.seek(0)
+    return bio.getvalue()
+
+
+def generate_html_report(analytics, start_date, end_date, db_last_update=None):
     """Генерация HTML отчета с современными стилями"""
     # Подготовка данных для графиков
     status_chart_data = []
@@ -225,21 +355,15 @@ def generate_html_report(analytics, start_date, end_date):
         # Обрезаем название организации
         org_name_short = truncate_text(org_name, 40)
 
-        # Получаем сумму счетов
-        invoice_amount = get_invoice_amount(order)
-        amount_text = f"{invoice_amount:,}".replace(',', ' ') + " ₽" if invoice_amount else "—"
-
-        # Получаем статус регистрации
-        registration_status = get_registration_status(order)
-
+        safe_order_id = json.dumps(order_id)
+        comm_short, comm_full = get_last_comment_for_display(order)
         table_rows += f"""
-                        <tr class="clickable-row" onclick="openRequest({order_id})" title="Кликните для открытия заявки">
+                        <tr class="clickable-row" onclick="openRequest({safe_order_id})" title="Кликните для открытия заявки">
                             <td>{index}</td>
                             <td title="{org_name}">{org_name_short}</td>
                             <td>{org_inn}</td>
-                            <td>{amount_text}</td>
                             <td><span class="status-badge {status_class}">{status_text}</span></td>
-                            <td>{registration_status}</td>
+                            <td class="comment-cell" title="{comm_full}">{comm_short}</td>
                             <td>{manager_name}</td>
                             <td>{created_date.strftime('%d.%m.%Y %H:%M')}</td>
                         </tr>
@@ -324,6 +448,13 @@ def generate_html_report(analytics, start_date, end_date):
 
         .period-form button:hover {{
             background: #5a6fd8;
+        }}
+
+        .period-form .btn-excel {{
+            background: #217346;
+        }}
+        .period-form .btn-excel:hover {{
+            background: #1a5c38;
         }}
 
         .quick-periods {{
@@ -486,6 +617,13 @@ def generate_html_report(analytics, start_date, end_date):
         .status-refund {{ background: #e3f2fd; color: #1565c0; }}
         .status-canceled {{ background: #ffebee; color: #d32f2f; }}
 
+        .comment-cell {{
+            font-size: 0.9em;
+            max-width: 320px;
+            line-height: 1.35;
+            color: #374151;
+        }}
+
         @media print {{
             .period-selector {{ display: none; }}
             body {{ background: white; }}
@@ -513,6 +651,7 @@ def generate_html_report(analytics, start_date, end_date):
                 <label>по:</label>
                 <input type="date" name="end" value="{end_date.strftime('%Y-%m-%d')}" required>
                 <button type="submit">📊 Сформировать отчет</button>
+                <button type="button" class="btn-excel" onclick="downloadReportExcel()">📥 Скачать Excel</button>
             </form>
             <div class="quick-periods">
                 <button onclick="setQuickPeriod('today')">Сегодня</button>
@@ -525,6 +664,11 @@ def generate_html_report(analytics, start_date, end_date):
 
         <div class="period">
             <strong>Период:</strong> {start_date.strftime('%d.%m.%Y')} - {end_date.strftime('%d.%m.%Y')}
+        </div>
+        <div class="period" style="font-size:0.95em;color:#6c757d;">
+            В отчёт входят только заявки, <strong>созданные</strong> в выбранном периоде (по дате появления в CRM).
+            Последняя синхронизация данных по ним в БД: <strong>{db_last_update.strftime('%d.%m.%Y %H:%M') if db_last_update else '—'}</strong>.
+            <a href="/sync?next=/report" style="margin-left:8px;color:#667eea;">Обновить из CRM сейчас</a>
         </div>
 
         <div class="stats-grid">
@@ -572,9 +716,8 @@ def generate_html_report(analytics, start_date, end_date):
                             <th>№</th>
                             <th>Организация</th>
                             <th>ИНН</th>
-                            <th>Сумма счетов</th>
                             <th>Статус</th>
-                            <th>Регистрация</th>
+                            <th>Комментарий для банка</th>
                             <th>Менеджер</th>
                             <th>Дата создания</th>
                         </tr>
@@ -598,6 +741,26 @@ def generate_html_report(analytics, start_date, end_date):
             }}
         }}
 
+        function downloadReportExcel() {{
+            const form = document.querySelector('.period-form');
+            const start = form.querySelector('input[name="start"]').value;
+            const end = form.querySelector('input[name="end"]').value;
+            if (!start || !end) {{
+                alert('Укажите период (даты с / по)');
+                return;
+            }}
+            const q = new URLSearchParams({{ start, end }}).toString();
+            window.location.href = '/report/export?' + q;
+        }}
+
+        // Дата в локальном календаре (не UTC — иначе «Сегодня» съезжает на соседний день)
+        function toLocalYMD(d) {{
+            const y = d.getFullYear();
+            const m = String(d.getMonth() + 1).padStart(2, '0');
+            const day = String(d.getDate()).padStart(2, '0');
+            return y + '-' + m + '-' + day;
+        }}
+
         // Функция для быстрого выбора периода
         function setQuickPeriod(period) {{
             const now = new Date();
@@ -607,11 +770,12 @@ def generate_html_report(analytics, start_date, end_date):
                 case 'today':
                     startDate = endDate = now;
                     break;
-                case 'yesterday':
+                case 'yesterday': {{
                     const yesterday = new Date(now);
                     yesterday.setDate(yesterday.getDate() - 1);
                     startDate = endDate = yesterday;
                     break;
+                }}
                 case 'week':
                     endDate = now;
                     startDate = new Date(now);
@@ -629,8 +793,8 @@ def generate_html_report(analytics, start_date, end_date):
                     break;
             }}
 
-            document.querySelector('input[name="start"]').value = startDate.toISOString().split('T')[0];
-            document.querySelector('input[name="end"]').value = endDate.toISOString().split('T')[0];
+            document.querySelector('input[name="start"]').value = toLocalYMD(startDate);
+            document.querySelector('input[name="end"]').value = toLocalYMD(endDate);
         }}
 
         // Данные для графиков
@@ -638,67 +802,73 @@ def generate_html_report(analytics, start_date, end_date):
         const managerData = {json.dumps(manager_chart_data)};
         const dailyData = {json.dumps(daily_chart_data)};
 
-        // График статусов
-        const statusCtx = document.getElementById('statusChart').getContext('2d');
-        new Chart(statusCtx, {{
-            type: 'doughnut',
-            data: {{
-                labels: statusData.map(item => item.label),
-                datasets: [{{
-                    data: statusData.map(item => item.value),
-                    backgroundColor: [
-                        '#FF6384', '#36A2EB', '#FFCE56', '#4BC0C0', '#9966FF', '#FF9F40'
-                    ]
-                }}]
-            }},
-            options: {{
-                responsive: true,
-                plugins: {{
-                    legend: {{ position: 'bottom' }}
+        const chartColors = [
+            '#FF6384', '#36A2EB', '#FFCE56', '#4BC0C0', '#9966FF', '#FF9F40'
+        ];
+
+        // График статусов (Chart.js падает на полностью пустых данных)
+        if (statusData.length > 0) {{
+            const statusCtx = document.getElementById('statusChart').getContext('2d');
+            new Chart(statusCtx, {{
+                type: 'doughnut',
+                data: {{
+                    labels: statusData.map(item => item.label),
+                    datasets: [{{
+                        data: statusData.map(item => item.value),
+                        backgroundColor: chartColors
+                    }}]
+                }},
+                options: {{
+                    responsive: true,
+                    plugins: {{
+                        legend: {{ position: 'bottom' }}
+                    }}
                 }}
-            }}
-        }});
+            }});
+        }}
 
-        // График менеджеров
-        const managerCtx = document.getElementById('managerChart').getContext('2d');
-        new Chart(managerCtx, {{
-            type: 'bar',
-            data: {{
-                labels: managerData.map(item => item.label),
-                datasets: [{{
-                    label: 'Количество заявок',
-                    data: managerData.map(item => item.value),
-                    backgroundColor: '#667eea'
-                }}]
-            }},
-            options: {{
-                responsive: true,
-                plugins: {{ legend: {{ display: false }} }},
-                scales: {{ y: {{ beginAtZero: true }} }}
-            }}
-        }});
+        if (managerData.length > 0) {{
+            const managerCtx = document.getElementById('managerChart').getContext('2d');
+            new Chart(managerCtx, {{
+                type: 'bar',
+                data: {{
+                    labels: managerData.map(item => item.label),
+                    datasets: [{{
+                        label: 'Количество заявок',
+                        data: managerData.map(item => item.value),
+                        backgroundColor: '#667eea'
+                    }}]
+                }},
+                options: {{
+                    responsive: true,
+                    plugins: {{ legend: {{ display: false }} }},
+                    scales: {{ y: {{ beginAtZero: true }} }}
+                }}
+            }});
+        }}
 
-        // График динамики
-        const timelineCtx = document.getElementById('timelineChart').getContext('2d');
-        new Chart(timelineCtx, {{
-            type: 'line',
-            data: {{
-                labels: dailyData.map(item => item.date),
-                datasets: [{{
-                    label: 'Количество заявок',
-                    data: dailyData.map(item => item.value),
-                    borderColor: '#667eea',
-                    backgroundColor: 'rgba(102, 126, 234, 0.1)',
-                    fill: true,
-                    tension: 0.4
-                }}]
-            }},
-            options: {{
-                responsive: true,
-                plugins: {{ legend: {{ display: false }} }},
-                scales: {{ y: {{ beginAtZero: true }} }}
-            }}
-        }});
+        if (dailyData.length > 0) {{
+            const timelineCtx = document.getElementById('timelineChart').getContext('2d');
+            new Chart(timelineCtx, {{
+                type: 'line',
+                data: {{
+                    labels: dailyData.map(item => item.date),
+                    datasets: [{{
+                        label: 'Количество заявок',
+                        data: dailyData.map(item => item.value),
+                        borderColor: '#667eea',
+                        backgroundColor: 'rgba(102, 126, 234, 0.1)',
+                        fill: true,
+                        tension: 0.4
+                    }}]
+                }},
+                options: {{
+                    responsive: true,
+                    plugins: {{ legend: {{ display: false }} }},
+                    scales: {{ y: {{ beginAtZero: true }} }}
+                }}
+            }});
+        }}
     </script>
 </body>
 </html>
@@ -706,47 +876,81 @@ def generate_html_report(analytics, start_date, end_date):
     return html
 
 
+@app.route('/report/export')
+def export_report_xlsx():
+    """Выгрузка таблицы отчёта в Excel (те же start/end, что у /report)."""
+    try:
+        display_start, display_end, search_start, search_end = parse_report_period()
+        data = get_requests_from_db(search_start, search_end)
+        analytics = analyze_data(data)
+        blob = build_xlsx_report_bytes(analytics['raw_data'], display_start, display_end)
+        fname = (
+            f"crm_report_{display_start.strftime('%Y-%m-%d')}_"
+            f"{display_end.strftime('%Y-%m-%d')}.xlsx"
+        )
+        return Response(
+            blob,
+            mimetype=(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            ),
+            headers={
+                "Content-Disposition": f'attachment; filename="{fname}"',
+            },
+        )
+    except RuntimeError as e:
+        return Response(str(e), mimetype="text/plain; charset=utf-8", status=500)
+    except Exception as e:
+        logger.exception("Ошибка выгрузки Excel")
+        return Response(
+            f"Ошибка: {e}",
+            mimetype="text/plain; charset=utf-8",
+            status=500,
+        )
+
+
 @app.route('/report')
 def generate_report():
     """API для генерации отчета"""
-    # Получаем параметры периода
-    start_param = request.args.get('start')
-    end_param = request.args.get('end')
-
-    if start_param and end_param:
-        # Парсим даты
-        start_date = datetime.strptime(start_param, '%Y-%m-%d')
-        end_date = datetime.strptime(end_param, '%Y-%m-%d')
-
-        # Сохраняем даты для отображения (без времени)
-        display_start = start_date
-        display_end = end_date
-
-        # Устанавливаем время для поиска в БД: начало дня для start_date, конец дня для end_date
-        search_start = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
-        search_end = end_date.replace(hour=23, minute=59, second=59, microsecond=999999)
-    else:
-        # По умолчанию - текущий месяц
-        now = datetime.now()
-        display_start = now.replace(day=1)
-        display_end = now
-        search_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        search_end = now.replace(hour=23, minute=59, second=59, microsecond=999999)
+    display_start, display_end, search_start, search_end = parse_report_period()
+    start_date = display_start
+    end_date = display_end
 
     try:
         # Получаем данные из БД используя временной интервал
         data = get_requests_from_db(search_start, search_end)
+        db_last = get_last_db_update_in_period(search_start, search_end)
 
         # Анализируем
         analytics = analyze_data(data)
 
         # Генерируем HTML (передаем даты для отображения)
-        html = generate_html_report(analytics, display_start, display_end)
+        html = generate_html_report(analytics, display_start, display_end, db_last)
 
         return Response(html, mimetype='text/html')
 
     except Exception as e:
-        return f"Ошибка генерации отчета: {str(e)}", 500
+        logger.exception("Ошибка генерации отчета")
+        err_html = f"""<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ошибка отчёта</title>
+    <style>
+        body {{ font-family: system-ui, sans-serif; max-width: 640px; margin: 40px auto; padding: 0 16px; }}
+        h1 {{ color: #c0392b; }}
+        pre {{ background: #f4f4f4; padding: 12px; overflow: auto; border-radius: 8px; }}
+        a {{ color: #667eea; }}
+    </style>
+</head>
+<body>
+    <h1>Ошибка генерации отчёта</h1>
+    <p>Проверьте, что PostgreSQL запущен и база <code>crm_reports</code> доступна с учётными данными из <code>config.py</code>.</p>
+    <pre>{html_module.escape(str(e))}</pre>
+    <p><a href="/report">Повторить</a></p>
+</body>
+</html>"""
+        return Response(err_html, mimetype="text/html", status=500)
 
 
 if __name__ == "__main__":

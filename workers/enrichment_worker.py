@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from psycopg2.extras import Json
 from config import DB_CONFIG, CRM_CONFIG
+from last_comment import build_status_fallback_comment, resolve_last_comment
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - ENRICHMENT - %(message)s')
@@ -235,7 +236,15 @@ def enrich_request_data(token, request_id, current_data):
             "status": "not_exists"
         }
 
-    # Добавляем обогащенные данные к существующим
+    order_for_lc = current_data if isinstance(current_data, dict) else {}
+    try:
+        enrichment["last_comment"] = resolve_last_comment(
+            token, int(request_id), install_data, order_for_lc
+        )
+    except Exception as e:
+        logging.warning("last_comment для заявки %s: %s", request_id, e)
+        enrichment["last_comment"] = build_status_fallback_comment(order_for_lc)
+
     enriched_data = current_data.copy()
     enriched_data["enrichment"] = enrichment
 
