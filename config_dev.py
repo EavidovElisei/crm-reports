@@ -22,7 +22,17 @@ CRM_CONFIG = {
     'client_id': 'cashdesk-rest-client',
     'client_secret': 'cashdesk-rest-client',
     'manager_ids': [104, 61, 22, 281, 234, 285, 289, 291],
-    'statuses': ['NEW', 'DRAFT', 'INCOME_CREATED', 'INCOME_PAID', 'KKT_LINKED', 'COMPLETED', 'CANCELED_BY_CLIENT']
+    'statuses': [
+        'NEW',
+        'DRAFT',
+        'INCOME_CREATED',
+        'INCOME_PAID',
+        'KKT_LINKED',
+        'COMPLETED',
+        'CANCELED_BY_CLIENT',
+        'CANCELED_BY_BANK',
+        'ARCHIVE',
+    ]
 }
 
 # Конфигурация планировщика
@@ -58,7 +68,9 @@ STATUS_LABELS = {
     'INCOME_PAID': 'Счет оплачен',
     'KKT_LINKED': 'В работе',
     'COMPLETED': 'Завершена',
-    'CANCELED_BY_CLIENT': 'Отменена'
+    'CANCELED_BY_CLIENT': 'Отменена',
+    'CANCELED_BY_BANK': 'Отменено банком',
+    'ARCHIVE': 'Архив',
 }
 
 STATUS_CLASSES = {
@@ -68,7 +80,9 @@ STATUS_CLASSES = {
     'INCOME_PAID': 'status-income-paid',
     'KKT_LINKED': 'status-kkt-linked',
     'COMPLETED': 'status-completed',
-    'CANCELED_BY_CLIENT': 'status-canceled'
+    'CANCELED_BY_CLIENT': 'status-canceled',
+    'CANCELED_BY_BANK': 'status-canceled-by-bank',
+    'ARCHIVE': 'status-archive',
 }
 
 # Конфигурация аутентификации для разработки

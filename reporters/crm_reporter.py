@@ -87,6 +87,8 @@ def _empty_analytics_result():
         'COMPLETED',
         'REFUND',
         'CANCELED_BY_CLIENT',
+        'CANCELED_BY_BANK',
+        'ARCHIVE',
     ]
     return {
         'total_orders': 0,
@@ -130,7 +132,9 @@ def analyze_data(data):
         'KKT_LINKED',
         'COMPLETED',
         'REFUND',
-        'CANCELED_BY_CLIENT'
+        'CANCELED_BY_CLIENT',
+        'CANCELED_BY_BANK',
+        'ARCHIVE',
     ]
     status_stats = {}
     for status in status_order:
@@ -301,7 +305,9 @@ def generate_html_report(analytics, start_date, end_date, db_last_update=None):
         'KKT_LINKED',
         'COMPLETED',
         'REFUND',
-        'CANCELED_BY_CLIENT'
+        'CANCELED_BY_CLIENT',
+        'CANCELED_BY_BANK',
+        'ARCHIVE',
     ]:
         if status in analytics['status_stats'] and analytics['status_stats'][status] > 0:
             status_chart_data.append({
@@ -616,6 +622,8 @@ def generate_html_report(analytics, start_date, end_date, db_last_update=None):
         .status-completed {{ background: #e8f5e8; color: #2e7d32; }}
         .status-refund {{ background: #e3f2fd; color: #1565c0; }}
         .status-canceled {{ background: #ffebee; color: #d32f2f; }}
+        .status-canceled-by-bank {{ background: #ffebee; color: #b71c1c; }}
+        .status-archive {{ background: #eceff1; color: #455a64; }}
 
         .comment-cell {{
             font-size: 0.9em;

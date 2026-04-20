@@ -36,7 +36,9 @@ CRM_CONFIG = {
         'KKT_LINKED',
         'COMPLETED',
         'REFUND',
-        'CANCELED_BY_CLIENT'
+        'CANCELED_BY_CLIENT',
+        'CANCELED_BY_BANK',
+        'ARCHIVE',
     ]
 }
 
@@ -88,7 +90,9 @@ STATUS_LABELS = {
     'KKT_LINKED': 'В работе',
     'COMPLETED': 'Завершена',
     'REFUND': 'Возвращен',
-    'CANCELED_BY_CLIENT': 'Отменена'
+    'CANCELED_BY_CLIENT': 'Отменена',
+    'CANCELED_BY_BANK': 'Отменено банком',
+    'ARCHIVE': 'Архив',
 }
 
 STATUS_CLASSES = {
@@ -100,7 +104,9 @@ STATUS_CLASSES = {
     'KKT_LINKED': 'status-kkt-linked',
     'COMPLETED': 'status-completed',
     'REFUND': 'status-refund',
-    'CANCELED_BY_CLIENT': 'status-canceled'
+    'CANCELED_BY_CLIENT': 'status-canceled',
+    'CANCELED_BY_BANK': 'status-canceled-by-bank',
+    'ARCHIVE': 'status-archive',
 }
 # Конфигурация аутентификации для защищенных разделов
 AUTH_CONFIG = {
