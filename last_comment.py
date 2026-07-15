@@ -59,65 +59,54 @@ def resolve_last_comment(
 
 
 def get_last_comment_for_display(order: dict) -> Tuple[str, str]:
-    c = extract_alfa_bank_comment_from_dict(order if isinstance(order, dict) else None)
-    if not c:
-        en = order.get("enrichment") if isinstance(order.get("enrichment"), dict) else {}
-        lc = en.get("last_comment") if isinstance(en.get("last_comment"), dict) else None
-        if lc and str(lc.get("source", "")) == "alfa_bank" and str(lc.get("text", "")).strip():
-            c = lc
-
+    c = _get_last_comment(order)
     if not c or not str(c.get("text", "")).strip():
         dash = "—"
         safe = html_module.escape(dash)
         return safe, safe
 
     text = str(c["text"]).strip()
-    at = c.get("at")
-    time_s = ""
-    if at is not None:
-        try:
-            ms = float(at)
-            if ms < 1e12:
-                ms *= 1000
-            dt = datetime.fromtimestamp(ms / 1000.0)
-            time_s = dt.strftime("%d.%m.%Y %H:%M")
-        except (ValueError, TypeError, OSError):
-            time_s = ""
-
-    full = f"{text} · {time_s}" if time_s else text
-
     try:
         max_len = min(200, int(COMMENTS_CONFIG.get("max_length", 200)))
     except (TypeError, ValueError):
         max_len = 200
-    short = full if len(full) <= max_len else full[: max_len - 1] + "…"
+    short = text if len(text) <= max_len else text[: max_len - 1] + "…"
 
-    return html_module.escape(short), html_module.escape(full)
+    return html_module.escape(short), html_module.escape(text)
 
 
 def get_last_comment_plain(order: dict) -> str:
     """Текст комментария для банка без HTML (Excel, экспорт). Пустая строка если нет."""
+    c = _get_last_comment(order)
+    return str(c["text"]).strip() if c and str(c.get("text", "")).strip() else ""
+
+
+def get_last_comment_date_plain(order: dict) -> str:
+    """Дата последнего банковского комментария в формате отчёта."""
+    c = _get_last_comment(order)
+    return _format_comment_timestamp(c.get("at")) if c else ""
+
+
+def _get_last_comment(order: dict) -> Optional[Dict[str, Any]]:
     c = extract_alfa_bank_comment_from_dict(order if isinstance(order, dict) else None)
     if not c:
         en = order.get("enrichment") if isinstance(order.get("enrichment"), dict) else {}
         lc = en.get("last_comment") if isinstance(en.get("last_comment"), dict) else None
         if lc and str(lc.get("source", "")) == "alfa_bank" and str(lc.get("text", "")).strip():
             c = lc
-    if not c or not str(c.get("text", "")).strip():
+    return c
+
+
+def _format_comment_timestamp(at: Any) -> str:
+    if at is None:
         return ""
-    text = str(c["text"]).strip()
-    at = c.get("at")
-    time_s = ""
-    if at is not None:
-        try:
-            ms = float(at)
-            if ms < 1e12:
-                ms *= 1000
-            dt = datetime.fromtimestamp(ms / 1000.0)
-            time_s = dt.strftime("%d.%m.%Y %H:%M")
-        except (ValueError, TypeError, OSError):
-            time_s = ""
-    return f"{text} · {time_s}" if time_s else text
+    try:
+        ms = float(at)
+        if ms < 1e12:
+            ms *= 1000
+        return datetime.fromtimestamp(ms / 1000.0).strftime("%d.%m.%Y %H:%M")
+    except (ValueError, TypeError, OSError):
+        return ""
 
 
 def build_status_fallback_comment(order: dict) -> Dict[str, Any]:

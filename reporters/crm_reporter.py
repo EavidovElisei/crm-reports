@@ -10,7 +10,11 @@ import psycopg2  # pyright: ignore[reportMissingModuleSource]
 from datetime import datetime, timedelta
 from flask import Flask, request, Response  # pyright: ignore[reportMissingImports]
 from config import DB_CONFIG, MANAGER_NAMES, STATUS_LABELS, STATUS_CLASSES, CRM_CONFIG
-from last_comment import get_last_comment_for_display, get_last_comment_plain
+from last_comment import (
+    get_last_comment_date_plain,
+    get_last_comment_for_display,
+    get_last_comment_plain,
+)
 
 app = Flask(__name__)
 logger = logging.getLogger(__name__)
@@ -229,7 +233,7 @@ def build_xlsx_report_bytes(raw_orders, display_start, display_end):
         "Статус",
         "Комментарий для банка",
         "Менеджер",
-        "Дата создания",
+        "Дата комментария",
     ]
     ws.append(headers)
     header_row = ws.max_row
@@ -247,16 +251,6 @@ def build_xlsx_report_bytes(raw_orders, display_start, display_end):
         if not order or not isinstance(order, dict):
             continue
         row_num += 1
-        try:
-            created_ts = order.get('created', 0)
-            created_date = (
-                datetime.fromtimestamp(created_ts / 1000)
-                if created_ts
-                else datetime.now()
-            )
-        except (ValueError, TypeError, OSError):
-            created_date = datetime.now()
-
         status = order.get('status', 'UNKNOWN')
         status_text = STATUS_LABELS.get(status, status)
         manager_id = order.get('callCenterManagerId', 'unknown')
@@ -274,7 +268,7 @@ def build_xlsx_report_bytes(raw_orders, display_start, display_end):
                 status_text,
                 get_last_comment_plain(order),
                 manager_name,
-                created_date.strftime('%d.%m.%Y %H:%M'),
+                get_last_comment_date_plain(order),
             ]
         )
 
@@ -340,13 +334,6 @@ def generate_html_report(analytics, start_date, end_date, db_last_update=None):
         if not order or not isinstance(order, dict):
             continue
 
-        # Безопасное получение данных с проверками
-        try:
-            created_timestamp = order.get('created', 0)
-            created_date = datetime.fromtimestamp(created_timestamp / 1000) if created_timestamp else datetime.now()
-        except (ValueError, TypeError, OSError):
-            created_date = datetime.now()
-
         status = order.get('status', 'UNKNOWN')
         status_class = STATUS_CLASSES.get(status, '')
         status_text = STATUS_LABELS.get(status, status)
@@ -363,6 +350,7 @@ def generate_html_report(analytics, start_date, end_date, db_last_update=None):
 
         safe_order_id = json.dumps(order_id)
         comm_short, comm_full = get_last_comment_for_display(order)
+        comment_date = get_last_comment_date_plain(order)
         table_rows += f"""
                         <tr class="clickable-row" onclick="openRequest({safe_order_id})" title="Кликните для открытия заявки">
                             <td>{index}</td>
@@ -371,7 +359,7 @@ def generate_html_report(analytics, start_date, end_date, db_last_update=None):
                             <td><span class="status-badge {status_class}">{status_text}</span></td>
                             <td class="comment-cell" title="{comm_full}">{comm_short}</td>
                             <td>{manager_name}</td>
-                            <td>{created_date.strftime('%d.%m.%Y %H:%M')}</td>
+                            <td>{comment_date or "—"}</td>
                         </tr>
         """
 
@@ -727,7 +715,7 @@ def generate_html_report(analytics, start_date, end_date, db_last_update=None):
                             <th>Статус</th>
                             <th>Комментарий для банка</th>
                             <th>Менеджер</th>
-                            <th>Дата создания</th>
+                            <th>Дата комментария</th>
                         </tr>
                     </thead>
                     <tbody>
