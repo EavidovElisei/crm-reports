@@ -101,6 +101,8 @@ def _empty_analytics_result():
         'conversion_rate': 0.0,
         'status_stats': {s: 0 for s in status_order},
         'manager_stats': {},
+        'cancellation_rating': [],
+        'total_cancellations': 0,
         'daily_stats': {},
         'raw_data': [],
     }
@@ -144,6 +146,30 @@ def analyze_data(data):
     for status in status_order:
         status_stats[status] = len([order for order in valid_data if order.get('status') == status])
 
+    # Рейтинг причин отмен: группируем комментарии для клиентских и банковских отмен.
+    cancellation_statuses = {'CANCELED_BY_CLIENT', 'CANCELED_BY_BANK'}
+    cancellation_comment_stats = {}
+    total_cancellations = 0
+    for order in valid_data:
+        status = order.get('status')
+        if status not in cancellation_statuses:
+            continue
+        total_cancellations += 1
+        comment = get_last_comment_plain(order) or 'Без комментария'
+        key = (status, comment)
+        cancellation_comment_stats[key] = cancellation_comment_stats.get(key, 0) + 1
+
+    cancellation_rating = [
+        {
+            'status': STATUS_LABELS.get(status, status),
+            'comment': comment,
+            'count': count,
+            'percent': round(count / total_cancellations * 100, 1),
+        }
+        for (status, comment), count in cancellation_comment_stats.items()
+    ]
+    cancellation_rating.sort(key=lambda item: (-item['count'], item['status'], item['comment']))
+
     # Статистика по менеджерам
     manager_stats = {}
     for order in valid_data:
@@ -169,6 +195,8 @@ def analyze_data(data):
         'conversion_rate': round(conversion_rate, 1),
         'status_stats': status_stats,
         'manager_stats': manager_stats,
+        'cancellation_rating': cancellation_rating,
+        'total_cancellations': total_cancellations,
         'daily_stats': daily_stats,
         'raw_data': valid_data
     }
@@ -309,12 +337,25 @@ def generate_html_report(analytics, start_date, end_date, db_last_update=None):
                 'value': analytics['status_stats'][status]
             })
 
-    manager_chart_data = []
-    for manager_id, count in analytics['manager_stats'].items():
-        manager_chart_data.append({
-            'label': MANAGER_NAMES.get(manager_id, f'Менеджер {manager_id}'),
-            'value': count
-        })
+    cancellation_rating_rows = ""
+    for item in analytics['cancellation_rating']:
+        status = html_module.escape(str(item['status']))
+        comment = html_module.escape(str(item['comment']))
+        cancellation_rating_rows += f"""
+                            <tr>
+                                <td>{status}</td>
+                                <td>{comment}</td>
+                                <td>{item['count']}</td>
+                                <td>{item['percent']}%</td>
+                            </tr>
+        """
+
+    if not cancellation_rating_rows:
+        cancellation_rating_rows = """
+                            <tr>
+                                <td colspan="4">За выбранный период отмен с комментариями нет.</td>
+                            </tr>
+        """
 
     # Подготовка данных для графика динамики
     daily_chart_data = []
@@ -693,8 +734,22 @@ def generate_html_report(analytics, start_date, end_date, db_last_update=None):
                     <canvas id="statusChart"></canvas>
                 </div>
                 <div class="chart-container">
-                    <div class="chart-title">Заявки по менеджерам</div>
-                    <canvas id="managerChart"></canvas>
+                    <div class="chart-title">Рейтинг причин отмен</div>
+                    <div style="overflow-x: auto;">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Статус</th>
+                                    <th>Комментарий для банка</th>
+                                    <th>Количество</th>
+                                    <th>Доля отмен</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {cancellation_rating_rows}
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
             </div>
             <div class="chart-container">
@@ -795,7 +850,6 @@ def generate_html_report(analytics, start_date, end_date, db_last_update=None):
 
         // Данные для графиков
         const statusData = {json.dumps(status_chart_data)};
-        const managerData = {json.dumps(manager_chart_data)};
         const dailyData = {json.dumps(daily_chart_data)};
 
         const chartColors = [
@@ -819,26 +873,6 @@ def generate_html_report(analytics, start_date, end_date, db_last_update=None):
                     plugins: {{
                         legend: {{ position: 'bottom' }}
                     }}
-                }}
-            }});
-        }}
-
-        if (managerData.length > 0) {{
-            const managerCtx = document.getElementById('managerChart').getContext('2d');
-            new Chart(managerCtx, {{
-                type: 'bar',
-                data: {{
-                    labels: managerData.map(item => item.label),
-                    datasets: [{{
-                        label: 'Количество заявок',
-                        data: managerData.map(item => item.value),
-                        backgroundColor: '#667eea'
-                    }}]
-                }},
-                options: {{
-                    responsive: true,
-                    plugins: {{ legend: {{ display: false }} }},
-                    scales: {{ y: {{ beginAtZero: true }} }}
                 }}
             }});
         }}
