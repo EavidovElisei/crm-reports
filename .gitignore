@@ -56,8 +56,19 @@ logs/
 
 # Config files with sensitive data
 config_local.py
+config_production.py
 .env.local
+deployment_info.txt
 
 # Temporary files
 *.tmp
 *.temp
+
+# Production-only operational data
+backup/
+*.tgz
+deploy.sh
+config_original.py
+backup_db.sh
+manage.sh
+start.sh
