@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 from psycopg2.extras import Json
 from config import DB_CONFIG, CRM_CONFIG
 from last_comment import build_status_fallback_comment, resolve_last_comment
+from delivery_address import extract_delivery_address, extract_delivery_city
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - ENRICHMENT - %(message)s')
@@ -178,6 +179,14 @@ def enrich_request_data(token, request_id, current_data):
         appointment_from_install = _extract_appointment_from_install(install_data)
         if appointment_from_install:
             enrichment["registration_appointment_date"] = appointment_from_install
+
+        # Адрес доставки ККТ (originalSpotAddress и аналоги)
+        delivery_address = extract_delivery_address(current_data, install_data=install_data)
+        if delivery_address:
+            enrichment["original_spot_address"] = delivery_address
+        delivery_city = extract_delivery_city(current_data, install_data=install_data)
+        if delivery_city:
+            enrichment["delivery_city"] = delivery_city
 
     # 2. Получаем информацию о регистрации
     registration_info = fetch_registration_info(token, request_id)
