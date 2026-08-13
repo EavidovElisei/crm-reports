@@ -5,8 +5,11 @@ import re
 
 ADDRESS_KEYS = (
     'originalSpotAddress',
+    'original_spot_address',
     'spotAddress',
+    'spot_address',
     'deliveryAddress',
+    'delivery_address',
     'kktDeliveryAddress',
     'delivery_city',
     'deliveryCity',
