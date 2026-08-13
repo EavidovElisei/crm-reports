@@ -334,6 +334,11 @@ def generate_html_template(data):
     <div class="header">
         <h1>Контроль бизнес-процессов</h1>
         <div class="last-update">Последнее обновление: {data['current_time']}</div>
+        <div style="margin-top: 12px;">
+            <a href="/sla" style="color: white; font-weight: 600; text-decoration: underline;">
+                Детализация SLA →
+            </a>
+        </div>
     </div>
 
     <div class="container">
