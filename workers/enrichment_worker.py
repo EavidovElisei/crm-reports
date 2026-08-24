@@ -119,15 +119,86 @@ def _extract_appointment_from_install(install_data):
     if not isinstance(install_data, dict):
         return None
     value = install_data.get('yClientRecordDate')
-    # Значение уже в мс по контракту; просто вернем, если это int/float/строка-число
-    if isinstance(value, (int, float)):
-        return int(value)
-    if isinstance(value, str):
-        try:
-            return int(value)
-        except ValueError:
-            return None
+    return value if isinstance(value, (int, float)) else None
+
+
+def _extract_delivery_address_from_install(install_data):
+    """Полный адрес доставки ККТ из ответа install API (kkmDeliveryAddress)."""
+    if not isinstance(install_data, dict):
+        return None
+    value = install_data.get('kkmDeliveryAddress')
+    if isinstance(value, str) and value.strip():
+        return value.strip()
     return None
+
+
+def _city_from_delivery_address(address):
+    """Населённый пункт из строки адреса доставки ККТ."""
+    if not isinstance(address, str) or not address.strip():
+        return None
+    parts = [p.strip() for p in address.split(',') if p.strip()]
+    prefixes = (
+        'г ', 'г.', 'город ',
+        'п ', 'п.', 'посёлок ', 'поселок ', 'рп ',
+        'с ', 'с.', 'село ',
+        'деревня ', 'ст-ца ', 'станица ',
+        'аул ', 'хутор ',
+    )
+    for part in parts:
+        low = part.lower()
+        if low.startswith('д.') or low.startswith('д '):
+            rest = part.split('.', 1)[-1].strip() if '.' in part else part[1:].strip()
+            if rest[:1].isdigit():
+                continue
+        if any(low.startswith(prefix) for prefix in prefixes):
+            return part
+    return None
+
+
+def _extract_delivery_city_from_install(install_data):
+    """Город получателя из ответа install API."""
+    if not isinstance(install_data, dict):
+        return None
+
+    candidates = (
+        'deliveryCity',
+        'delivery_city',
+        'recipientCity',
+        'clientCity',
+        'city',
+        'cityName',
+        'organizationCity',
+        'deliveryAddressCity',
+    )
+
+    def from_mapping(obj):
+        if not isinstance(obj, dict):
+            return None
+        for key in candidates:
+            value = obj.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+            if isinstance(value, dict):
+                for nested_key in ('name', 'title', 'value', 'city', 'cityName'):
+                    nested = value.get(nested_key)
+                    if isinstance(nested, str) and nested.strip():
+                        return nested.strip()
+        for nest_key in ('delivery', 'deliveryAddress', 'address', 'recipient', 'client', 'organization'):
+            nest = obj.get(nest_key)
+            if isinstance(nest, dict):
+                found = from_mapping(nest)
+                if found:
+                    return found
+                for nested_key in ('city', 'cityName', 'name', 'settlement', 'town'):
+                    nested = nest.get(nested_key)
+                    if isinstance(nested, str) and nested.strip():
+                        return nested.strip()
+        return None
+
+    found = from_mapping(install_data)
+    if found:
+        return found
+    return _city_from_delivery_address(_extract_delivery_address_from_install(install_data))
 
 
 def fetch_order_info(token, order_id):
@@ -178,6 +249,14 @@ def enrich_request_data(token, request_id, current_data):
         appointment_from_install = _extract_appointment_from_install(install_data)
         if appointment_from_install:
             enrichment["registration_appointment_date"] = appointment_from_install
+
+        delivery_city = _extract_delivery_city_from_install(install_data)
+        if delivery_city:
+            enrichment["delivery_city"] = delivery_city
+
+        delivery_address = _extract_delivery_address_from_install(install_data)
+        if delivery_address:
+            enrichment["delivery_address"] = delivery_address
 
     # 2. Получаем информацию о регистрации
     registration_info = fetch_registration_info(token, request_id)
