@@ -23,6 +23,12 @@ logging.basicConfig(
 
 def detect_python_command():
     """Автоматическое определение команды Python"""
+    # При запуске из virtualenv (./.venv, ./venv) берём его интерпретатор:
+    # системный python не знает про установленные зависимости (psycopg2, requests и т.д.)
+    if sys.prefix != sys.base_prefix and sys.executable:
+        logging.info(f"✅ Используем интерпретатор virtualenv: {sys.executable}")
+        return sys.executable
+
     commands = ['python', 'python3', 'py']
 
     for cmd in commands:
@@ -40,10 +46,27 @@ def detect_python_command():
 
 
 def find_workers():
-    """Поиск всех воркеров в папке"""
-    pattern = os.path.join(SCHEDULER_CONFIG['workers_dir'], '*_worker.py')
-    workers = glob.glob(pattern)
-    return sorted(workers)
+    """Поиск воркеров в папке
+
+    Периодические воркеры запускаются в порядке SCHEDULER_CONFIG['worker_order']:
+    сначала токен, затем заявки, обогащение и аналитика.
+    Остальные *_worker.py (разовые скрипты вроде batch_enrichment_worker.py)
+    автоматически не запускаются.
+    """
+    workers_dir = SCHEDULER_CONFIG['workers_dir']
+    ordered = []
+    for name in SCHEDULER_CONFIG.get('worker_order', []):
+        path = os.path.join(workers_dir, name)
+        if os.path.exists(path):
+            ordered.append(path)
+        else:
+            logging.warning(f"⚠️ Воркер из worker_order не найден: {name}")
+
+    if ordered:
+        return ordered
+
+    # Фолбэк, если порядок не задан
+    return sorted(glob.glob(os.path.join(workers_dir, '*_worker.py')))
 
 
 def run_worker(worker_path, python_cmd):
@@ -59,10 +82,13 @@ def run_worker(worker_path, python_cmd):
         env['PYTHONPATH'] = project_root
         
         # Настраиваем прокси для доступа к внешним API
-        if 'HTTP_PROXY' not in env:
-            env['HTTP_PROXY'] = 'http://192.168.8.8:3128'
-        if 'HTTPS_PROXY' not in env:
-            env['HTTPS_PROXY'] = 'http://192.168.8.8:3128'
+        # (на боевом сервере прокси обязателен, локально его можно отключить в config_local.py)
+        proxy = SCHEDULER_CONFIG.get('proxy')
+        if proxy:
+            if 'HTTP_PROXY' not in env:
+                env['HTTP_PROXY'] = proxy
+            if 'HTTPS_PROXY' not in env:
+                env['HTTPS_PROXY'] = proxy
         
         # Запускаем воркер без захвата вывода (позволяем ему логировать самостоятельно)
         result = subprocess.run(

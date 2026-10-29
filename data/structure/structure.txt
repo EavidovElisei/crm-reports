@@ -1,0 +1,135 @@
+                    path                     |  type   |  n   | distinct_vals | max_len 
+---------------------------------------------+---------+------+---------------+---------
+ .briefingCompleteDate                       | null    | 6846 |             0 |        
+ .briefingCompleteDate                       | number  | 2250 |          2250 |        
+ .callCenterManagerId                        | number  | 9096 |            10 |        
+ .cancelledDate                              | null    | 7438 |             0 |        
+ .cancelledDate                              | number  | 1658 |          1653 |        
+ .clientType                                 | string  | 9096 |             3 |       8
+ .contactName                                | string  | 9096 |          8148 |      45
+ .contactPhone                               | string  | 9096 |          8184 |      11
+ .created                                    | number  | 9096 |          9074 |        
+ .createdByManager                           | boolean | 9096 |             2 |        
+ .deliveredDate                              | null    | 3709 |             0 |        
+ .deliveredDate                              | number  | 5387 |          5376 |        
+ .deviceInfo                                 | array   |  212 |             0 |        
+ .deviceInfo[]                               | object  |  212 |             0 |        
+ .deviceInfo[].carrier                       | string  |  204 |             4 |       7
+ .deviceInfo[].cashConnectionType            | string  |  212 |             2 |      27
+ .deviceInfo[].cashServiceType               | string  |  212 |             2 |      27
+ .deviceInfo[].connectionType                | string  |  212 |             2 |      29
+ .deviceInfo[].forGasStation                 | boolean |  212 |             1 |        
+ .deviceInfo[].noCoins                       | boolean |  212 |             1 |        
+ .deviceInfo[].paymentCertificate            | boolean |  212 |             1 |        
+ .deviceInfo[].pinpadRequired                | boolean |  212 |             1 |        
+ .deviceInfo[].preauthorization              | boolean |  212 |             1 |        
+ .deviceInfo[].sbp                           | boolean |  212 |             2 |        
+ .deviceInfo[].skipBankNameOnReceipt         | boolean |  212 |             1 |        
+ .deviceInfo[].terminalNameOnReceipt         | string  |  212 |           210 |      22
+ .deviceInfo[].terminalServiceType           | string  |  212 |             2 |      14
+ .deviceInfo[].tid                           | string  |  212 |           212 |       8
+ .enrichment                                 | object  | 4978 |             0 |        
+ .enrichment.additional_order                | object  | 4978 |             0 |        
+ .enrichment.additional_order.amount         | null    | 1335 |             0 |        
+ .enrichment.additional_order.amount         | number  | 3643 |            53 |        
+ .enrichment.additional_order.order_id       | null    | 1330 |             0 |        
+ .enrichment.additional_order.order_id       | number  | 3648 |          3608 |        
+ .enrichment.additional_order.paid_time      | null    | 2239 |             0 |        
+ .enrichment.additional_order.paid_time      | number  | 2739 |           745 |        
+ .enrichment.additional_order.status         | string  | 4978 |             4 |      10
+ .enrichment.enriched_at                     | number  | 4978 |          4900 |        
+ .enrichment.fns_registration_status         | string  | 4978 |             2 |      14
+ .enrichment.fns_registration_time           | null    | 4978 |             0 |        
+ .enrichment.last_comment                    | object  | 1216 |             0 |        
+ .enrichment.last_comment.at                 | null    |   39 |             0 |        
+ .enrichment.last_comment.at                 | number  | 1177 |          1177 |        
+ .enrichment.last_comment.author             | null    | 1216 |             0 |        
+ .enrichment.last_comment.source             | string  | 1216 |             2 |       9
+ .enrichment.last_comment.text               | string  | 1216 |           122 |     199
+ .enrichment.main_order                      | null    | 1330 |             0 |        
+ .enrichment.main_order                      | object  | 3648 |             0 |        
+ .enrichment.main_order.amount               | null    |    2 |             0 |        
+ .enrichment.main_order.amount               | number  | 3646 |            22 |        
+ .enrichment.main_order.order_id             | number  | 3648 |          3608 |        
+ .enrichment.main_order.paid_time            | null    |  905 |             0 |        
+ .enrichment.main_order.paid_time            | number  | 2743 |           764 |        
+ .enrichment.main_order.status               | string  | 3648 |             3 |       7
+ .enrichment.registration_appointment_date   | null    | 3083 |             0 |        
+ .enrichment.registration_appointment_date   | number  | 1895 |          1216 |        
+ .externalId                                 | string  | 9096 |          9072 |      32
+ .fnType                                     | null    | 8893 |             0 |        
+ .fnType                                     | string  |  203 |             2 |       5
+ .id                                         | number  | 9096 |          9096 |        
+ .incomePaidDate                             | null    | 3365 |             0 |        
+ .incomePaidDate                             | number  | 5731 |          5731 |        
+ .incomeSetDate                              | null    | 1525 |             0 |        
+ .incomeSetDate                              | number  | 7571 |          7571 |        
+ .kkmRegistrationDate                        | null    | 3951 |             0 |        
+ .kkmRegistrationDate                        | number  | 5145 |          5145 |        
+ .lastBankComment                            | null    |  219 |             0 |        
+ .lastBankComment                            | string  | 8877 |           151 |     199
+ .lastBankCommentDate                        | null    |  155 |             0 |        
+ .lastBankCommentDate                        | number  | 8941 |          8941 |        
+ .lastReceiptDate                            | null    | 3923 |             0 |        
+ .lastReceiptDate                            | number  | 5173 |          4605 |        
+ .meetingRecordDate                          | null    | 6499 |             0 |        
+ .meetingRecordDate                          | number  | 2597 |          1339 |        
+ .organizationId                             | null    |   36 |             0 |        
+ .organizationId                             | string  | 9060 |          8187 |      24
+ .organizationInn                            | string  | 9096 |          8198 |      12
+ .organizationName                           | string  | 9096 |          8186 |      85
+ .plannedRegistrationDate                    | null    | 4463 |             0 |        
+ .plannedRegistrationDate                    | number  | 4421 |          2565 |        
+ .registrationType                           | string  | 9096 |             1 |      12
+ .request                                    | object  |  212 |             0 |        
+ .request.deviceInfo                         | array   |  212 |             0 |        
+ .request.deviceInfo[]                       | object  |  212 |             0 |        
+ .request.deviceInfo[].carrier               | string  |  204 |             4 |       7
+ .request.deviceInfo[].cashConnectionType    | string  |  212 |             2 |      27
+ .request.deviceInfo[].cashServiceType       | string  |  212 |             2 |      27
+ .request.deviceInfo[].connectionType        | string  |  212 |             2 |      29
+ .request.deviceInfo[].forGasStation         | boolean |  212 |             1 |        
+ .request.deviceInfo[].noCoins               | boolean |  212 |             1 |        
+ .request.deviceInfo[].paymentCertificate    | boolean |  212 |             1 |        
+ .request.deviceInfo[].pinpadRequired        | boolean |  212 |             1 |        
+ .request.deviceInfo[].preauthorization      | boolean |  212 |             1 |        
+ .request.deviceInfo[].sbp                   | boolean |  212 |             2 |        
+ .request.deviceInfo[].skipBankNameOnReceipt | boolean |  212 |             1 |        
+ .request.deviceInfo[].terminalNameOnReceipt | string  |  212 |           210 |      22
+ .request.deviceInfo[].terminalServiceType   | string  |  212 |             2 |      14
+ .request.deviceInfo[].tid                   | string  |  212 |           212 |       8
+ .requestType                                | null    | 8884 |             0 |        
+ .sentToDeliveryDate                         | null    | 3526 |             0 |        
+ .sentToDeliveryDate                         | number  | 5570 |          5570 |        
+ .status                                     | string  | 9096 |             9 |      21
+ .subStatus                                  | null    | 9096 |             0 |        
+ .yClientsRecordDate                         | null    | 6836 |             0 |        
+ .yClientsRecordDate                         | number  | 2260 |          1412 |        
+(105 rows)
+
+    table_name     |   column_name    |          data_type          
+-------------------+------------------+-----------------------------
+ analytics_data    | id               | integer
+ analytics_data    | data             | jsonb
+ analytics_data    | created_at       | timestamp without time zone
+ analytics_data    | period_start     | timestamp without time zone
+ analytics_data    | period_end       | timestamp without time zone
+ analytics_data    | updated_at       | timestamp without time zone
+ auth_tokens       | id               | integer
+ auth_tokens       | service          | character varying
+ auth_tokens       | login            | character varying
+ auth_tokens       | password         | character varying
+ auth_tokens       | current_token    | text
+ auth_tokens       | token_updated_at | timestamp without time zone
+ auth_tokens       | created_at       | timestamp without time zone
+ requests          | id               | bigint
+ requests          | created_at       | timestamp without time zone
+ requests          | data             | jsonb
+ requests          | updated_at       | timestamp without time zone
+ sla_delay_reasons | request_id       | bigint
+ sla_delay_reasons | stage_key        | text
+ sla_delay_reasons | reason           | text
+ sla_delay_reasons | created_at       | timestamp without time zone
+ sla_delay_reasons | updated_at       | timestamp without time zone
+(22 rows)
+

@@ -72,3 +72,6 @@ config_original.py
 backup_db.sh
 manage.sh
 start.sh
+
+# PowerPoint-окружение и локальные данные
+docs/landing/

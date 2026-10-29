@@ -50,6 +50,8 @@ SCHEDULER_CONFIG = {
     'workers_dir': './workers',
     'interval': _SYNC_INTERVAL,
     'python_cmd': 'python',  # при запуске из main/scheduler подставляется sys.executable
+    # Прокси для воркеров. На боевом сервере нужен обязательно, локально — закомментируйте
+    'proxy': (os.environ.get('CRM_PROXY', 'http://192.168.8.8:3128') or None),
     # Важно: сначала токен, потом заявки, обогащение, аналитика
     'worker_order': [
         'auth_worker.py',
@@ -61,11 +63,9 @@ SCHEDULER_CONFIG = {
 
 # Конфигурация веб-сервера
 WEB_CONFIG = {
-    # Для локальной разработки безопаснее слушать только localhost
-    'host': '127.0.0.1',
-    # Меняем порт, чтобы не конфликтовать с другими сервисами
-    'port': 5000,
-    'debug': False
+    "host": "0.0.0.0",
+    "port": 8080,
+    "debug": False
 }
 
 # Справочники

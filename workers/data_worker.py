@@ -75,6 +75,18 @@ def save_requests_to_db(requests_data):
             existing_data = existing[0]
             # Сохраняем enrichment если есть
             enrichment = existing_data.get('enrichment') if isinstance(existing_data, dict) else None
+            # Также сохраняем deviceInfo/TID, если они уже были обогащены ранее
+            preserved_req_device_info = None
+            preserved_root_device_info = None
+            if isinstance(existing_data, dict):
+                # request.deviceInfo
+                ex_req = existing_data.get('request') if isinstance(existing_data.get('request'), dict) else None
+                if ex_req and isinstance(ex_req.get('deviceInfo'), list) and len(ex_req['deviceInfo']) > 0:
+                    preserved_req_device_info = ex_req['deviceInfo']
+                # root deviceInfo
+                ex_di = existing_data.get('deviceInfo')
+                if isinstance(ex_di, list) and len(ex_di) > 0:
+                    preserved_root_device_info = ex_di
 
             # Сравниваем только основные данные (без enrichment)
             existing_without_enrichment = existing_data.copy() if isinstance(existing_data, dict) else existing_data
@@ -86,12 +98,24 @@ def save_requests_to_db(requests_data):
                 new_data = request.copy()
                 if enrichment:
                     new_data['enrichment'] = enrichment
+                # Если в новых данных нет deviceInfo, а в БД он был — переносим
+                # 1) request.deviceInfo
+                new_req_block = new_data.get('request') if isinstance(new_data.get('request'), dict) else None
+                if preserved_req_device_info and (not new_req_block or not isinstance(new_req_block.get('deviceInfo'), list) or len(new_req_block.get('deviceInfo') or []) == 0):
+                    if not isinstance(new_req_block, dict):
+                        new_req_block = {}
+                    new_req_block['deviceInfo'] = preserved_req_device_info
+                    new_data['request'] = new_req_block
+                # 2) root deviceInfo
+                if preserved_root_device_info and (not isinstance(new_data.get('deviceInfo'), list) or len(new_data.get('deviceInfo') or []) == 0):
+                    new_data['deviceInfo'] = preserved_root_device_info
 
                 cur.execute("""
                     UPDATE requests 
                     SET data = %s, updated_at = %s 
                     WHERE id = %s
                 """, (Json(new_data), datetime.now(), request_id))
+                updated_count += 1
         else:
             # Вставляем новую заявку
             cur.execute("""

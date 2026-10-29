@@ -9,8 +9,11 @@ from datetime import datetime
 
 import psycopg2
 from flask import Flask, request, Response, jsonify
+from psycopg2.extras import Json
 
 from config import DB_CONFIG, STATUS_LABELS
+from last_comment import extract_bank_comment_list, fetch_bank_request_bundle
+from lib.region_heatmap import fetch_heatmap_payload, render_heatmap_section
 
 app = Flask(__name__)
 
@@ -24,9 +27,25 @@ EXCLUDED_STATUSES = {
     'REFUND',
 }
 
-# Этапы: key, title, from_field, to_field, group
-# Эталоны (good/warning) — по медиане и p75 за последний год (авг 2025–авг 2026).
-# good ≈ «типично/идеал», warning ≈ p75, выше — выбивается (bad).
+# Статус кассы/посылки для этапа «Отправка → доставка».
+# DELIVERED в CRM соответствует финалу Почты России.
+DELIVERY_STATUS_LABELS = {
+    'NEW': 'Новая',
+    'QUEUE': 'В очереди',
+    'DISTRIBUTED': 'Распределена',
+    'READY': 'Готова к выдаче',
+    'WAIT_ORDER': 'Ожидание заказа',
+    'CDEK_FF_PENDING': 'Ожидание CDEK FF',
+    'WAIT_COURIER_ASSIGN': 'Ожидание курьера',
+    'SHIPMENT': 'Отгрузка',
+    'DELIVERY': 'В доставке',
+    'DELIVERED': 'Успешно доставлен и вручен адресату (конечный статус)',
+    'ON_THE_WAY_CDEK_FF': 'В пути CDEK FF',
+    'REFUND': 'Возврат',
+}
+
+# Идеальные сроки. Всё, что дольше — невыполнение (подсветка bad).
+# good хранится в сутках.
 SLA_STAGES = [
     {
         'key': 'lead_to_invoice',
@@ -34,8 +53,8 @@ SLA_STAGES = [
         'from_field': 'created',
         'to_field': 'incomeSetDate',
         'group': 'stages',
-        'good': 0.5,
-        'warning': 1.0,
+        'good': 1.0,
+        'unit': 'days',
         'show_city': False,
     },
     {
@@ -44,8 +63,8 @@ SLA_STAGES = [
         'from_field': 'incomeSetDate',
         'to_field': 'incomePaidDate',
         'group': 'stages',
-        'good': 2.0,
-        'warning': 5.0,
+        'good': 1.0,
+        'unit': 'days',
         'show_city': False,
     },
     {
@@ -55,7 +74,7 @@ SLA_STAGES = [
         'to_field': 'sentToDeliveryDate',
         'group': 'stages',
         'good': 1.0,
-        'warning': 3.0,
+        'unit': 'days',
         'show_city': True,
     },
     {
@@ -64,9 +83,10 @@ SLA_STAGES = [
         'from_field': 'sentToDeliveryDate',
         'to_field': 'deliveredDate',
         'group': 'stages',
-        'good': 4.0,
-        'warning': 7.0,
+        'good': 6.0,
+        'unit': 'days',
         'show_city': True,
+        'status_source': 'delivery',
     },
     {
         'key': 'delivered_to_install',
@@ -74,8 +94,8 @@ SLA_STAGES = [
         'from_field': 'deliveredDate',
         'to_field': 'kkmRegistrationDate',
         'group': 'stages',
-        'good': 3.0,
-        'warning': 7.0,
+        'good': 1.0,
+        'unit': 'days',
         'show_city': False,
     },
     {
@@ -84,8 +104,8 @@ SLA_STAGES = [
         'from_field': 'created',
         'to_field': 'kkmRegistrationDate',
         'group': 'cjm',
-        'good': 14.0,
-        'warning': 21.0,
+        'good': 10.0,
+        'unit': 'days',
         'show_city': False,
     },
     {
@@ -94,8 +114,8 @@ SLA_STAGES = [
         'from_field': 'incomeSetDate',
         'to_field': 'kkmRegistrationDate',
         'group': 'cjm',
-        'good': 12.0,
-        'warning': 21.0,
+        'good': 7.0,
+        'unit': 'days',
         'show_city': False,
     },
 ]
@@ -127,10 +147,22 @@ def parse_sla_period():
     return search_start, search_end
 
 
-def format_days(value):
-    if value is None:
+def format_duration(days, unit='days'):
+    """Формат срока: часы для этапа счёта, иначе дни."""
+    if days is None:
         return "—"
-    return f"{value:.1f}".replace(".", ",") + " дн."
+    if unit == 'hours':
+        hours = float(days) * 24
+        if abs(hours - round(hours)) < 0.05:
+            return f"{int(round(hours))} ч"
+        return f"{hours:.1f}".replace(".", ",") + " ч"
+    if abs(float(days) - round(float(days))) < 0.05:
+        return f"{int(round(float(days)))} дн"
+    return f"{float(days):.1f}".replace(".", ",") + " дн"
+
+
+def format_days(value):
+    return format_duration(value, 'days')
 
 
 def format_number(value):
@@ -143,18 +175,19 @@ def format_number(value):
     return str(value)
 
 
-def tone_lower_better(value, good, warning):
+def tone_lower_better(value, good, warning=None):
+    """good — идеал; всё, что дольше, считается невыполнением."""
     if value is None:
         return "neutral"
-    if value <= good:
+    if value <= good + 1e-9:
         return "good"
-    if value <= warning:
+    if warning is not None and warning > good and value <= warning:
         return "warning"
     return "bad"
 
 
 def ms_to_days(ms):
-    return round(ms / MS_DAY, 2)
+    return round(ms / MS_DAY, 4)
 
 
 def parse_ms(value):
@@ -275,6 +308,106 @@ def extract_delivery_city(data):
     return "—"
 
 
+def extract_delivery_status(data):
+    """Статус доставки ККТ.
+
+    Если есть deliveredDate — это финал Почты России.
+    Иначе берём статус кассы из enrichment или факт отправки.
+    """
+    if not isinstance(data, dict):
+        return "—"
+    if parse_ms(data.get('deliveredDate')) is not None:
+        return DELIVERY_STATUS_LABELS['DELIVERED']
+    enrichment = data.get('enrichment') if isinstance(data.get('enrichment'), dict) else {}
+    raw = enrichment.get('delivery_status') or data.get('delivery_status')
+    if isinstance(raw, str) and raw.strip():
+        code = raw.strip()
+        return DELIVERY_STATUS_LABELS.get(code, code)
+    if parse_ms(data.get('sentToDeliveryDate')) is not None:
+        return DELIVERY_STATUS_LABELS['DELIVERY']
+    return "—"
+
+
+def get_crm_token():
+    conn = psycopg2.connect(**DB_CONFIG)
+    cur = conn.cursor()
+    cur.execute("SELECT current_token FROM auth_tokens WHERE service = 'crm'")
+    result = cur.fetchone()
+    cur.close()
+    conn.close()
+    if not result or not result[0]:
+        raise ValueError("Токен CRM не найден")
+    return result[0]
+
+
+def cache_bank_comments(request_id, bundle):
+    """Пишем историю статусов в enrichment, не затирая остальные поля."""
+    conn = psycopg2.connect(**DB_CONFIG)
+    cur = conn.cursor()
+    cur.execute("SELECT data FROM requests WHERE id = %s", (request_id,))
+    row = cur.fetchone()
+    if not row or not isinstance(row[0], dict):
+        cur.close()
+        conn.close()
+        return
+    data = row[0]
+    enrichment = data.get("enrichment") if isinstance(data.get("enrichment"), dict) else {}
+    bank_request = (
+        enrichment.get("bank_request")
+        if isinstance(enrichment.get("bank_request"), dict)
+        else {}
+    )
+    bank_request.update(bundle or {})
+    enrichment["bank_request"] = bank_request
+    data["enrichment"] = enrichment
+    cur.execute(
+        "UPDATE requests SET data = %s, updated_at = %s WHERE id = %s",
+        (Json(data), datetime.now(), request_id),
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def render_crm_comments_table(items):
+    if not items:
+        return '<div class="crm-empty">Нет статусов в CRM</div>'
+    rows = []
+    for item in items:
+        rows.append(
+            "<tr>"
+            f"<td>{html.escape(str(item.get('sender') or '—'))}</td>"
+            f"<td>{html.escape(str(item.get('comment') or '—'))}</td>"
+            f"<td class=\"crm-date\">{html.escape(str(item.get('created_label') or '—'))}</td>"
+            "</tr>"
+        )
+    return (
+        '<table class="crm-comments">'
+        "<thead><tr>"
+        "<th>Отправитель</th><th>Комментарий</th><th>Дата создания</th>"
+        "</tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody>"
+        "</table>"
+    )
+
+
+def render_crm_history_block(item):
+    comments = item.get("crm_comments") or []
+    loaded = "1" if comments else "0"
+    count = f" ({len(comments)})" if comments else ""
+    body = (
+        render_crm_comments_table(comments)
+        if comments
+        else '<div class="crm-loading">Загрузка истории статусов…</div>'
+    )
+    return (
+        f'<details class="crm-history" data-request-id="{item["id"]}" data-loaded="{loaded}">'
+        f"<summary>История статусов{count}</summary>"
+        f'<div class="crm-history-body">{body}</div>'
+        "</details>"
+    )
+
+
 def load_comments(request_ids):
     """Комментарии по заявкам: {(request_id, stage_key): comment}."""
     if not request_ids:
@@ -368,13 +501,17 @@ def build_stage_stats(rows, stage):
         city = extract_delivery_city(data) if show_city else "—"
         if show_city and city == "—" and address != "—":
             city = _city_from_delivery_address(address) or "—"
-        row_tone = tone_lower_better(days, stage['good'], stage['warning'])
+        row_tone = tone_lower_better(days, stage['good'])
+        if stage.get('status_source') == 'delivery':
+            status_label = extract_delivery_status(data)
+        else:
+            status_label = STATUS_LABELS.get(data.get('status'), data.get('status') or 'UNKNOWN')
         samples.append({
             'id': req_id,
             'organization': data.get('organizationName') or '—',
             'contact': data.get('contactName') or '—',
             'status': data.get('status') or 'UNKNOWN',
-            'status_label': STATUS_LABELS.get(data.get('status'), data.get('status') or 'UNKNOWN'),
+            'status_label': status_label,
             'from_ms': start_ms,
             'to_ms': end_ms,
             'from_label': format_ts(start_ms),
@@ -383,6 +520,7 @@ def build_stage_stats(rows, stage):
             'city': city,
             'address': address,
             'tone': row_tone,
+            'crm_comments': extract_bank_comment_list(data),
         })
         if show_city and city != "—":
             city_days.setdefault(city, []).append(days)
@@ -393,12 +531,14 @@ def build_stage_stats(rows, stage):
             'title': stage['title'],
             'group': stage['group'],
             'good': stage['good'],
-            'warning': stage['warning'],
+            'unit': stage.get('unit') or 'days',
             'show_city': show_city,
+            'status_source': stage.get('status_source') or 'crm',
             'avg': None,
             'med': None,
             'max': None,
             'n': 0,
+            'overdue_n': 0,
             'tone': 'neutral',
             'details': [],
             'city_stats': [],
@@ -407,21 +547,21 @@ def build_stage_stats(rows, stage):
     days_list = [s['days'] for s in samples]
     samples.sort(key=lambda s: s['days'], reverse=True)
     details = samples[:DETAIL_LIMIT]
-    med = round(statistics.median(days_list), 2)
-    avg = round(statistics.mean(days_list), 2)
-    mx = round(max(days_list), 2)
+    prec = 4 if stage.get('unit') == 'hours' else 2
+    med = round(statistics.median(days_list), prec)
+    avg = round(statistics.mean(days_list), prec)
+    mx = round(max(days_list), prec)
+    overdue_n = sum(1 for s in samples if s.get('tone') == 'bad')
 
     city_stats = []
     for city, values in city_days.items():
         city_stats.append({
             'city': city,
             'n': len(values),
-            'med': round(statistics.median(values), 2),
-            'avg': round(statistics.mean(values), 2),
-            'max': round(max(values), 2),
-            'tone': tone_lower_better(
-                statistics.median(values), stage['good'], stage['warning']
-            ),
+            'med': round(statistics.median(values), prec),
+            'avg': round(statistics.mean(values), prec),
+            'max': round(max(values), prec),
+            'tone': tone_lower_better(statistics.median(values), stage['good']),
         })
     city_stats.sort(key=lambda item: (-item['med'], -item['n'], item['city']))
 
@@ -430,13 +570,15 @@ def build_stage_stats(rows, stage):
         'title': stage['title'],
         'group': stage['group'],
         'good': stage['good'],
-        'warning': stage['warning'],
+        'unit': stage.get('unit') or 'days',
         'show_city': show_city,
+        'status_source': stage.get('status_source') or 'crm',
         'avg': avg,
         'med': med,
         'max': mx,
         'n': len(samples),
-        'tone': tone_lower_better(med, stage['good'], stage['warning']),
+        'overdue_n': overdue_n,
+        'tone': tone_lower_better(med, stage['good']),
         'details': details,
         'city_stats': city_stats[:30],
     }
@@ -461,6 +603,7 @@ def compute_sla_detail(start_dt, end_dt):
 
 def render_detail_rows(stage):
     show_city = bool(stage.get('show_city'))
+    unit = stage.get('unit') or 'days'
     col_span = 9 if show_city else 8
     if not stage['details']:
         return f'<tr><td colspan="{col_span}" class="empty">Нет данных за период</td></tr>'
@@ -473,6 +616,10 @@ def render_detail_rows(stage):
             if show_city else ''
         )
         address = html.escape(str(item.get('address') or '—'))
+        overdue_flag = (
+            '<div class="overdue-flag">просрочено</div>'
+            if item.get('tone') == 'bad' else ''
+        )
         rows_html.append(
             f'''<tr class="row-{item.get('tone', 'neutral')}">
                 <td>{item['id']}</td>
@@ -482,10 +629,10 @@ def render_detail_rows(stage):
                 </td>
                 {city_cell}
                 <td class="addr">{address}</td>
-                <td>{html.escape(item['status_label'])}</td>
+                <td class="status-cell">{html.escape(item['status_label'])}</td>
                 <td>{html.escape(item['from_label'])}</td>
                 <td>{html.escape(item['to_label'])}</td>
-                <td class="days {item.get('tone', 'neutral')}">{format_days(item['days'])}</td>
+                <td class="days {item.get('tone', 'neutral')}">{format_duration(item['days'], unit)}{overdue_flag}</td>
                 <td>
                     <div class="comment-box"
                          data-request-id="{item['id']}"
@@ -495,72 +642,48 @@ def render_detail_rows(stage):
                         <span class="save-status"></span>
                     </div>
                 </td>
+            </tr>
+            <tr class="crm-history-row">
+                <td colspan="{col_span}">{render_crm_history_block(item)}</td>
             </tr>'''
         )
     return ''.join(rows_html)
 
 
-def render_city_stats(stage):
-    if not stage.get('show_city'):
-        return ''
-    stats = stage.get('city_stats') or []
-    if not stats:
-        return (
-            '<div class="city-empty">Город получателя пока не заполнен в данных. '
-            'Появится после обогащения заявок из CRM install.</div>'
-        )
-    rows = []
-    for item in stats:
-        rows.append(
-            f'''<tr class="row-{item['tone']}">
-                <td>{html.escape(item['city'])}</td>
-                <td class="days {item['tone']}">{format_days(item['med'])}</td>
-                <td>{format_days(item['avg'])}</td>
-                <td class="days {item['tone']}">{format_days(item['max'])}</td>
-                <td>n={format_number(item['n'])}</td>
-            </tr>'''
-        )
-    return f'''
-    <div class="city-block">
-        <h4>Разрез по городу получателя</h4>
-        <div class="table-wrap">
-            <table>
-                <thead>
-                    <tr>
-                        <th>Город</th>
-                        <th>Медиана</th>
-                        <th>Среднее</th>
-                        <th>Максимум</th>
-                        <th>Выборка</th>
-                    </tr>
-                </thead>
-                <tbody>{''.join(rows)}</tbody>
-            </table>
-        </div>
-    </div>
-    '''
-
-
 def render_stage_card(stage):
     details_html = render_detail_rows(stage)
-    city_html = render_city_stats(stage)
     city_header = '<th>Город</th>' if stage.get('show_city') else ''
+    status_header = (
+        'Статус доставки'
+        if stage.get('status_source') == 'delivery'
+        else 'Статус'
+    )
+    unit = stage.get('unit') or 'days'
+    overdue_n = int(stage.get('overdue_n') or 0)
+    n_total = int(stage.get('n') or 0)
+    overdue_line = ''
+    if n_total:
+        overdue_cls = 'overdue-stat' if overdue_n else 'overdue-stat ok'
+        overdue_line = (
+            f'<div class="{overdue_cls}">Невыполнение: '
+            f'{format_number(overdue_n)} из {format_number(n_total)}</div>'
+        )
     return f'''
     <section class="stage-card {stage['tone']}">
         <div class="stage-top">
             <div>
                 <h3>{html.escape(stage['title'])}</h3>
-                <div class="etalon">Эталон ≤ {format_days(stage['good'])} · внимание ≤ {format_days(stage['warning'])}</div>
+                <div class="etalon">Идеал ≤ {format_duration(stage['good'], unit)}. Дольше — невыполнение.</div>
+                {overdue_line}
                 <div class="caption">Медиана</div>
-                <div class="med {stage['tone']}">{format_days(stage['med'])}</div>
+                <div class="med {stage['tone']}">{format_duration(stage['med'], unit)}</div>
             </div>
             <div class="stats">
-                <div><span>Среднее</span><strong class="{stage['tone']}">{format_days(stage['avg'])}</strong></div>
-                <div><span>Максимум</span><strong class="{stage['tone']}">{format_days(stage['max'])}</strong></div>
+                <div><span>Среднее</span><strong class="{stage['tone']}">{format_duration(stage['avg'], unit)}</strong></div>
+                <div><span>Максимум</span><strong class="{stage['tone']}">{format_duration(stage['max'], unit)}</strong></div>
                 <div><span>Выборка</span><strong>n={format_number(stage['n'])}</strong></div>
             </div>
         </div>
-        {city_html}
         <details class="stage-details">
             <summary>Детализация (топ-{DETAIL_LIMIT} самых долгих)</summary>
             <div class="table-wrap">
@@ -571,10 +694,10 @@ def render_stage_card(stage):
                             <th>Клиент</th>
                             {city_header}
                             <th>Адрес доставки ККТ</th>
-                            <th>Статус</th>
+                            <th>{status_header}</th>
                             <th>Начало</th>
                             <th>Конец</th>
-                            <th>Дней</th>
+                            <th>Срок</th>
                             <th>Комментарий</th>
                         </tr>
                     </thead>
@@ -631,9 +754,9 @@ def generate_html(stages, start_dt, end_dt):
         .header {{
             background: linear-gradient(135deg, var(--header-from), var(--header-to));
             color: #fff;
-            padding: 24px 20px 28px;
+            padding: 24px 24px 28px;
         }}
-        .header-inner {{ max-width: 1280px; margin: 0 auto; }}
+        .header-inner {{ max-width: none; margin: 0 auto; }}
         .header-top {{
             display: flex; justify-content: space-between; gap: 16px;
             flex-wrap: wrap; align-items: flex-start; margin-bottom: 16px;
@@ -661,7 +784,7 @@ def generate_html(stages, start_dt, end_dt):
         }}
         .period-bar button.primary {{ background: #fff; color: var(--header-from); border-color: #fff; }}
         .quick {{ display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }}
-        .container {{ max-width: 1280px; margin: 0 auto; padding: 20px; }}
+        .container {{ max-width: none; margin: 0 auto; padding: 20px 24px; }}
         .section-title {{
             font-size: 1.1rem; margin: 8px 0 12px; font-weight: 650;
         }}
@@ -689,7 +812,23 @@ def generate_html(stages, start_dt, end_dt):
         .etalon {{
             color: var(--muted);
             font-size: 0.82rem;
+            margin-bottom: 6px;
+        }}
+        .overdue-stat {{
+            color: var(--bad);
+            font-size: 0.85rem;
+            font-weight: 650;
             margin-bottom: 10px;
+        }}
+        .overdue-stat.ok {{ color: var(--good); }}
+        .overdue-flag {{
+            display: block;
+            margin-top: 4px;
+            font-size: 0.72rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+            color: var(--bad);
         }}
         .caption {{
             font-size: 0.75rem; color: var(--muted); text-transform: uppercase;
@@ -706,7 +845,8 @@ def generate_html(stages, start_dt, end_dt):
         .days.warning {{ color: var(--warning); }}
         .days.bad {{ color: var(--bad); font-weight: 800; }}
         tr.row-warning td {{ background: #fff7ed; }}
-        tr.row-bad td {{ background: #fee2e2; }}
+        tr.row-bad td {{ background: #fecaca; }}
+        tr.row-bad {{ box-shadow: inset 4px 0 0 var(--bad); }}
         .city-block {{
             margin-top: 14px;
             padding-top: 12px;
@@ -730,13 +870,13 @@ def generate_html(stages, start_dt, end_dt):
         }}
         .stats strong {{ color: var(--text); }}
         .stage-details {{ margin-top: 14px; }}
-        .stage-details summary {{
+        .stage-details > summary {{
             cursor: pointer; font-weight: 650; color: var(--accent);
             list-style: none; padding: 8px 0;
         }}
-        .stage-details summary::-webkit-details-marker {{ display: none; }}
-        .stage-details summary::before {{ content: "▸ "; }}
-        .stage-details[open] summary::before {{ content: "▾ "; }}
+        .stage-details > summary::-webkit-details-marker {{ display: none; }}
+        .stage-details > summary::before {{ content: "▸ "; }}
+        .stage-details[open] > summary::before {{ content: "▾ "; }}
         .table-wrap {{ overflow-x: auto; margin-top: 8px; }}
         table {{
             width: 100%; border-collapse: collapse; font-size: 0.88rem;
@@ -754,6 +894,11 @@ def generate_html(stages, start_dt, end_dt):
             color: #374151;
             white-space: normal;
         }}
+        .status-cell {{
+            max-width: 280px;
+            line-height: 1.35;
+            white-space: normal;
+        }}
         .days {{ font-weight: 700; white-space: nowrap; }}
         .empty {{ color: var(--muted); text-align: center; }}
         .comment-box {{ display: grid; gap: 6px; min-width: 220px; }}
@@ -768,6 +913,50 @@ def generate_html(stages, start_dt, end_dt):
         .save-status {{ font-size: 0.78rem; color: var(--muted); min-height: 1em; }}
         .save-status.ok {{ color: var(--good); }}
         .save-status.err {{ color: var(--bad); }}
+        .crm-history-row td {{
+            background: #fff;
+            padding: 0 10px 12px;
+            border-bottom: 1px solid var(--line);
+        }}
+        .crm-history summary {{
+            cursor: pointer;
+            color: var(--accent);
+            font-weight: 650;
+            font-size: 0.86rem;
+            list-style: none;
+            padding: 6px 0 4px;
+        }}
+        .crm-history summary::-webkit-details-marker {{ display: none; }}
+        .crm-history summary::before {{ content: "▸ "; }}
+        .crm-history[open] summary::before {{ content: "▾ "; }}
+        .crm-comments {{
+            width: 100%;
+            max-width: 960px;
+            border-collapse: collapse;
+            font-size: 0.84rem;
+            margin-top: 4px;
+        }}
+        .crm-comments th {{
+            background: #f3f4f6;
+            color: #4b5563;
+            font-weight: 650;
+            white-space: nowrap;
+        }}
+        .crm-comments th, .crm-comments td {{
+            border-bottom: 1px solid #e5e7eb;
+            padding: 8px 10px;
+            text-align: left;
+        }}
+        .crm-comments .crm-date {{
+            white-space: nowrap;
+            color: #6b7280;
+        }}
+        .crm-empty, .crm-loading, .crm-error {{
+            color: var(--muted);
+            font-size: 0.85rem;
+            padding: 8px 0;
+        }}
+        .crm-error {{ color: var(--bad); }}
         .note {{ color: var(--muted); font-size: 0.85rem; margin-top: 8px; }}
         @media (max-width: 900px) {{
             .med {{ font-size: 1.6rem; }}
@@ -784,6 +973,7 @@ def generate_html(stages, start_dt, end_dt):
                 </div>
                 <div class="actions">
                     <a class="btn" href="/dashboard">Дашборд</a>
+                    <a class="btn" href="/inventory">Инвентаризация</a>
                     <a class="btn" href="/">На главную</a>
                     <a class="btn" href="/report">Отчёт CRM</a>
                 </div>
@@ -805,6 +995,7 @@ def generate_html(stages, start_dt, end_dt):
     </div>
 
     <div class="container">
+        <!--HEATMAP-->
         <h2 class="section-title">Этапы воронки</h2>
         {stage_cards}
 
@@ -812,12 +1003,16 @@ def generate_html(stages, start_dt, end_dt):
         {cjm_cards}
 
         <p class="note">
-            Эталоны взяты по данным за последний год (медиана ≈ идеал, p75 ≈ внимание).
-            Карточки и строки выше эталона подсвечены контрастно.
+            Идеалы: счёт 1 дн., оплата 1 дн., отправка 1 дн., доставка 6 дн.,
+            обучение 1 дн., заявка→установка 10 дн., счёт→установка 7 дн.
+            Срок выше идеала подсвечен как невыполнение.
             Отменённые и refund исключены. В детализации — до {DETAIL_LIMIT} самых долгих кейсов.
             Адрес доставки ККТ берётся из поля CRM <code>kkmDeliveryAddress</code> после обогащения заявки.
-            Город получателя — из того же адреса (или отдельного поля города, если оно есть).
+            На этапе «Отправка → доставка» в колонке «Статус доставки» финал —
+            «Успешно доставлен и вручен адресату (конечный статус)».
             Комментарии сохраняются в БД по заявке и этапу.
+            История статусов CRM открывается в каждой строке (отправитель, комментарий, дата).
+            Тепловая карта считает отправки с января года даты «по»; регион берётся из адреса доставки ККТ.
         </p>
     </div>
 
@@ -865,6 +1060,50 @@ def generate_html(stages, start_dt, end_dt):
                 status.textContent = e.message || 'Ошибка';
             }}
         }}
+        const crmHistoryCache = {{}};
+        function renderCrmCommentsTable(items) {{
+            if (!items || !items.length) {{
+                return '<div class="crm-empty">Нет статусов в CRM</div>';
+            }}
+            const rows = items.map((item) => {{
+                const sender = (item.sender || '—').replace(/</g, '&lt;');
+                const comment = (item.comment || '—').replace(/</g, '&lt;');
+                const created = (item.created_label || '—').replace(/</g, '&lt;');
+                return `<tr><td>${{sender}}</td><td>${{comment}}</td><td class="crm-date">${{created}}</td></tr>`;
+            }}).join('');
+            return `<table class="crm-comments"><thead><tr><th>Отправитель</th><th>Комментарий</th><th>Дата создания</th></tr></thead><tbody>${{rows}}</tbody></table>`;
+        }}
+        async function loadCrmHistory(detailsEl) {{
+            const requestId = detailsEl.dataset.requestId;
+            const body = detailsEl.querySelector('.crm-history-body');
+            const summary = detailsEl.querySelector('summary');
+            if (crmHistoryCache[requestId]) {{
+                body.innerHTML = renderCrmCommentsTable(crmHistoryCache[requestId]);
+                detailsEl.dataset.loaded = '1';
+                summary.textContent = 'История статусов (' + crmHistoryCache[requestId].length + ')';
+                return;
+            }}
+            body.innerHTML = '<div class="crm-loading">Загрузка истории статусов…</div>';
+            try {{
+                const resp = await fetch('/sla/bank-comments/' + requestId);
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(data.error || 'Ошибка загрузки');
+                const items = data.comments || [];
+                crmHistoryCache[requestId] = items;
+                body.innerHTML = renderCrmCommentsTable(items);
+                detailsEl.dataset.loaded = '1';
+                summary.textContent = 'История статусов (' + items.length + ')';
+            }} catch (e) {{
+                body.innerHTML = '<div class="crm-error">' + (e.message || 'Не удалось загрузить историю') + '</div>';
+            }}
+        }}
+        document.addEventListener('toggle', (event) => {{
+            const detailsEl = event.target;
+            if (!(detailsEl instanceof HTMLDetailsElement)) return;
+            if (!detailsEl.classList.contains('crm-history') || !detailsEl.open) return;
+            if (detailsEl.dataset.loaded === '1') return;
+            loadCrmHistory(detailsEl);
+        }}, true);
     </script>
 </body>
 </html>'''
@@ -884,7 +1123,22 @@ def sla_detail_page():
             mimetype='text/html; charset=utf-8',
         )
 
-    html_content = generate_html(stages, start_dt, end_dt)
+    try:
+        heatmap_html = render_heatmap_section(fetch_heatmap_payload(end_dt))
+    except Exception as e:
+        print(f"❌ Ошибка тепловой карты регионов: {e}")
+        heatmap_html = (
+            '<section class="heat-wrap" id="region-heatmap">'
+            '<h2>Тепловая карта отправок по регионам</h2>'
+            '<div class="heat-empty">Не удалось построить карту регионов.</div>'
+            '</section>'
+        )
+
+    html_content = generate_html(stages, start_dt, end_dt).replace(
+        '<!--HEATMAP-->',
+        heatmap_html,
+        1,
+    )
     return Response(html_content, mimetype='text/html; charset=utf-8')
 
 
@@ -913,6 +1167,28 @@ def sla_save_comment():
         return jsonify({'error': 'Не удалось сохранить комментарий'}), 500
 
     return jsonify({'ok': True})
+
+
+@app.route('/sla/bank-comments/<int:request_id>')
+def sla_bank_comments(request_id):
+    """История статусов CRM по заявке (как в карточке install)."""
+    try:
+        token = get_crm_token()
+        bundle = fetch_bank_request_bundle(token, request_id)
+    except Exception as e:
+        print(f"❌ Ошибка чтения истории статусов CRM {request_id}: {e}")
+        return jsonify({'error': 'Не удалось загрузить историю статусов'}), 500
+
+    try:
+        cache_bank_comments(request_id, bundle)
+    except Exception as e:
+        print(f"⚠️ Не удалось кэшировать историю статусов {request_id}: {e}")
+
+    return jsonify({
+        'ok': True,
+        'request_id': request_id,
+        'comments': bundle.get('comments') or [],
+    })
 
 
 if __name__ == '__main__':

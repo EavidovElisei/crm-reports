@@ -13,7 +13,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from psycopg2.extras import Json
 from config import DB_CONFIG, CRM_CONFIG
-from last_comment import build_status_fallback_comment, resolve_last_comment
+from last_comment import (
+    build_status_fallback_comment,
+    fetch_bank_request_bundle,
+    resolve_last_comment,
+)
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - ENRICHMENT - %(message)s')
@@ -70,6 +74,27 @@ def get_requests_for_enrichment():
     conn.close()
 
     return requests_data
+
+
+def get_requests_missing_delivery_address(limit=80):
+    """Старые отправки без адреса: list/read его не содержит, нужен install."""
+    conn = psycopg2.connect(**DB_CONFIG)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, data
+        FROM requests
+        WHERE data->>'sentToDeliveryDate' IS NOT NULL
+          AND COALESCE(NULLIF(data#>>'{enrichment,delivery_address}', ''), '') = ''
+        ORDER BY created_at DESC
+        LIMIT %s
+        """,
+        (limit,),
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows
 
 
 def fetch_install_data(token, request_id):
@@ -222,6 +247,25 @@ def fetch_order_info(token, order_id):
         return None
 
 
+def fetch_kkm_device(token, device_id):
+    """Статус кассы/доставки по boxed_kkm_device.id (kkmId из install)."""
+    if not device_id:
+        return None
+    url = f"{CRM_CONFIG['base_url']}/admin-api/protected/boxed_kkm_device/{device_id}"
+    headers = {
+        'Authorization': token,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+    }
+    try:
+        response = requests.get(url, headers=headers, timeout=20)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        logging.warning(f"Ошибка получения устройства {device_id}: {e}")
+        return None
+
+
 def enrich_request_data(token, request_id, current_data):
     """Обогащение данных заявки"""
     enrichment = {
@@ -257,6 +301,13 @@ def enrich_request_data(token, request_id, current_data):
         delivery_address = _extract_delivery_address_from_install(install_data)
         if delivery_address:
             enrichment["delivery_address"] = delivery_address
+
+        device_id = install_data.get('kkmId')
+        if device_id:
+            enrichment["kkm_device_id"] = device_id
+            device = fetch_kkm_device(token, device_id)
+            if isinstance(device, dict) and device.get('status'):
+                enrichment["delivery_status"] = device.get('status')
 
     # 2. Получаем информацию о регистрации
     registration_info = fetch_registration_info(token, request_id)
@@ -316,6 +367,11 @@ def enrich_request_data(token, request_id, current_data):
         }
 
     order_for_lc = current_data if isinstance(current_data, dict) else {}
+    existing_en = (
+        current_data.get("enrichment")
+        if isinstance(current_data, dict) and isinstance(current_data.get("enrichment"), dict)
+        else {}
+    )
     try:
         enrichment["last_comment"] = resolve_last_comment(
             token, int(request_id), install_data, order_for_lc
@@ -323,6 +379,13 @@ def enrich_request_data(token, request_id, current_data):
     except Exception as e:
         logging.warning("last_comment для заявки %s: %s", request_id, e)
         enrichment["last_comment"] = build_status_fallback_comment(order_for_lc)
+
+    try:
+        enrichment["bank_request"] = fetch_bank_request_bundle(token, int(request_id))
+    except Exception as e:
+        logging.warning("bank_request для заявки %s: %s", request_id, e)
+        if isinstance(existing_en.get("bank_request"), dict):
+            enrichment["bank_request"] = existing_en["bank_request"]
 
     enriched_data = current_data.copy()
     enriched_data["enrichment"] = enrichment
@@ -361,6 +424,11 @@ def main():
 
         # Получаем заявки для обогащения
         requests_data = get_requests_for_enrichment()
+        seen = {item[0] for item in requests_data}
+        for item in get_requests_missing_delivery_address():
+            if item[0] not in seen:
+                requests_data.append(item)
+                seen.add(item[0])
         logging.info(f"📋 Найдено {len(requests_data)} заявок для обогащения")
 
         # Вычисляем время границы для логирования

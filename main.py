@@ -13,6 +13,7 @@ import logging
 import threading
 import importlib.util
 import glob
+import types
 from datetime import datetime
 from flask import Flask, render_template_string
 from config import WEB_CONFIG, SCHEDULER_CONFIG
@@ -31,11 +32,22 @@ def find_reporters():
     return sorted(reporters)
 
 
+def _ensure_package(package_name):
+    """Регистрирует папку как пакет, чтобы работали импорты вида `reporters.x`"""
+    if package_name in sys.modules:
+        return
+    package = types.ModuleType(package_name)
+    package.__path__ = [os.path.join(_ROOT, package_name)]
+    sys.modules[package_name] = package
+
+
 def load_reporter(reporter_path):
     """Загрузка репортера как модуля"""
     reporter_name = os.path.basename(reporter_path).replace('.py', '')
 
     try:
+        _ensure_package('reporters')
+        _ensure_package('lib')
         spec = importlib.util.spec_from_file_location(reporter_name, reporter_path)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
@@ -258,6 +270,69 @@ def index():
             font-weight: 600;
         }
 
+        .export-section {
+            padding: 30px;
+            background: #f8f9fa;
+            border-top: 1px solid #e9ecef;
+        }
+
+        .export-title {
+            font-size: 1.8em;
+            color: #2c3e50;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+
+        .export-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+        }
+
+        .export-card {
+            background: white;
+            border: 2px solid #e9ecef;
+            border-radius: 15px;
+            padding: 25px;
+            transition: all 0.3s;
+            cursor: pointer;
+            text-align: center;
+        }
+
+        .export-card:hover {
+            border-color: #28a745;
+            transform: translateY(-5px);
+            box-shadow: 0 15px 35px rgba(0, 0, 0, 0.1);
+        }
+
+        .export-icon {
+            font-size: 3em;
+            margin-bottom: 15px;
+        }
+
+        .export-name {
+            font-size: 1.3em;
+            font-weight: 600;
+            color: #2c3e50;
+            margin-bottom: 10px;
+        }
+
+        .export-description {
+            color: #6c757d;
+            margin-bottom: 15px;
+            line-height: 1.4;
+        }
+
+        .export-url {
+            background: #f8f9fa;
+            padding: 8px 12px;
+            border-radius: 8px;
+            font-family: monospace;
+            color: #28a745;
+            font-size: 0.9em;
+            border: 1px solid #e9ecef;
+        }
+
         .status-section {
             padding: 20px 30px;
             background: #e8f5e8;
@@ -334,6 +409,24 @@ def index():
             </div>
         </div>
 
+        <div class="export-section">
+            <h2 class="export-title">📊 Экспорт данных</h2>
+            <div class="export-grid">
+                <div class="export-card" onclick="exportExcel()">
+                    <div class="export-icon">📈</div>
+                    <div class="export-name">Экспорт в Excel</div>
+                    <div class="export-description">Скачать детальный отчет в формате Excel</div>
+                    <div class="export-url">/export/excel</div>
+                </div>
+                <div class="export-card" onclick="exportExcelWithDates()">
+                    <div class="export-icon">📅</div>
+                    <div class="export-name">Экспорт за период</div>
+                    <div class="export-description">Выбрать даты и экспортировать данные</div>
+                    <div class="export-url">/export/excel?start=YYYY-MM-DD&end=YYYY-MM-DD</div>
+                </div>
+            </div>
+        </div>
+
         <div class="status-section">
             <div class="status-text">✅ Система работает в штатном режиме</div>
         </div>
@@ -342,6 +435,37 @@ def index():
             CRM Analytics Dashboard • {{ current_time }}
         </div>
     </div>
+
+    <script>
+        function exportExcel() {
+            // Экспорт за все данные
+            window.open('/export/excel', '_blank');
+        }
+
+        function exportExcelWithDates() {
+            // Получаем текущую дату
+            const today = new Date();
+            const lastMonth = new Date(today.getFullYear(), today.getMonth() - 1, today.getDate());
+
+            const formatDate = (date) => {
+                const year = date.getFullYear();
+                const month = String(date.getMonth() + 1).padStart(2, '0');
+                const day = String(date.getDate()).padStart(2, '0');
+                return `${year}-${month}-${day}`;
+            };
+
+            const startDate = formatDate(lastMonth);
+            const endDate = formatDate(today);
+
+            // Запрашиваем даты у пользователя
+            const userStart = prompt(`Введите начальную дату (YYYY-MM-DD):`, startDate);
+            const userEnd = prompt(`Введите конечную дату (YYYY-MM-DD):`, endDate);
+
+            if (userStart && userEnd) {
+                window.open(`/export/excel?start=${userStart}&end=${userEnd}`, '_blank');
+            }
+        }
+    </script>
 </body>
 </html>
     """
