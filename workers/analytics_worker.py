@@ -13,18 +13,22 @@ import hashlib
 import base64
 import logging
 from datetime import datetime, timedelta
-from config import DB_CONFIG
+from config import DB_CONFIG, CRM_CONFIG
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - ANALYTICS_WORKER - %(message)s')
 
 # Конфигурация для analytics API
+# Тот же хост, что и у CRM: stage-адрес из доступа сотрудников недоступен
 ANALYTICS_CONFIG = {
-    'client_id': 'cashdesk-rest-client',
-    'client_secret': 'cashdesk-rest-client',
+    'client_id': CRM_CONFIG.get('client_id', 'cashdesk-rest-client'),
+    'client_secret': CRM_CONFIG.get('client_secret', 'cashdesk-rest-client'),
     'grant_type': 'password',
-    'auth_url': 'https://kassa.stage.bifit.com/admin-api/oauth/token',
-    'analytics_url': 'https://kassa.stage.bifit.com/admin-api/protected/boxed_kkm/analytics'
+    'auth_url': CRM_CONFIG.get('auth_url', 'https://kassa.bifit.com/admin-api/oauth/token'),
+    'analytics_url': CRM_CONFIG.get(
+        'analytics_url',
+        'https://kassa.bifit.com/admin-api/protected/boxed_kkm/analytics',
+    ),
 }
 
 

@@ -26,7 +26,7 @@ CRM_CONFIG = {
     'client_id': 'cashdesk-rest-client',
     'client_secret': 'cashdesk-rest-client',
     # Актуальный список ID менеджеров
-    'manager_ids': [307, 22, 281, 104, 304, 291, 285, 234, 61],
+    'manager_ids': [307, 22, 281, 104, 304, 291, 285, 234, 61, 319],
     'statuses': [
         'NEW',
         'DRAFT',
@@ -78,7 +78,8 @@ MANAGER_NAMES = {
     291: 'Борзова',
     285: 'Врона',
     234: 'Овсянкина',
-    61: 'Водопьянова'
+    61: 'Водопьянова',
+    319: 'Козлова'
 }
 
 STATUS_LABELS = {
