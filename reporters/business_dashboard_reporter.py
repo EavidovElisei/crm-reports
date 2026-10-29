@@ -810,6 +810,7 @@ def generate_html_template(data):
                 <div class="header-actions">
                     <a class="btn" href="/">На главную</a>
                     <a class="btn" href="/sla">Детализация SLA</a>
+                    <a class="btn" href="/sla/bank">SLA для банка</a>
                     <a class="btn" href="/inventory">Инвентаризация</a>
                     <a class="btn" href="/api/analytics">JSON API</a>
                     <a class="btn" href="/report">Отчёт CRM</a>

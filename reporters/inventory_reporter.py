@@ -794,6 +794,7 @@ PAGE = r"""
             <div class="actions">
                 <a class="btn" href="/dashboard">Дашборд</a>
                 <a class="btn" href="/sla">SLA</a>
+                <a class="btn" href="/sla/bank">SLA для банка</a>
                 <a class="btn" href="/report">Отчёт CRM</a>
                 <a class="btn" href="/">На главную</a>
             </div>
