@@ -293,7 +293,7 @@ def collect_phones(*sources):
     return found
 
 
-def fetch_calls_page(token, start_ms, end_ms, offset):
+def fetch_calls_page(token, start_ms, end_ms, offset, manager_ids=None):
     """Страница исходящих звонков телефонии CRM."""
     url = CRM_CONFIG['base_url'].rstrip('/') + '/admin-api/protected/telephony/list/read'
     headers = {
@@ -301,6 +301,9 @@ def fetch_calls_page(token, start_ms, end_ms, offset):
         'Accept': 'application/json, text/plain, */*',
         'Content-Type': 'application/json',
     }
+    manager_filter = (
+        list(CRM_CONFIG['manager_ids']) if manager_ids is None else list(manager_ids)
+    )
     response = requests.post(
         url,
         headers=headers,
@@ -313,7 +316,7 @@ def fetch_calls_page(token, start_ms, end_ms, offset):
             'route_type': 'OUTGOING',
             'include_empty_admin_user': 'true',
         },
-        json=list(CRM_CONFIG['manager_ids']),
+        json=manager_filter,
         timeout=60,
     )
     response.raise_for_status()
@@ -321,15 +324,16 @@ def fetch_calls_page(token, start_ms, end_ms, offset):
     return payload if isinstance(payload, dict) else {}
 
 
-def fetch_outgoing_calls(token, start_dt, end_dt):
+def fetch_outgoing_calls(token, start_dt, end_dt, manager_ids=None):
     """Исходящие звонки периода: индекс «номер получателя → время начала, мс».
 
-    У звонка со смены на смену бывает несколько строк, поэтому на номер
-    храним только самое раннее время — для SLA важен именно первый звонок.
+    У звонка в CRM несколько записей (по сменам), поэтому на номер
+    храним только самое раннее время — для SLA важен первый звонок.
+    manager_ids=None — звонки всех менеджеров (для отчёта банку по всем заявкам).
     """
     start_ms = int(start_dt.timestamp() * 1000)
     end_ms = int(end_dt.timestamp() * 1000)
-    first = fetch_calls_page(token, start_ms, end_ms, 0)
+    first = fetch_calls_page(token, start_ms, end_ms, 0, manager_ids)
     items = list(first.get('items') or [])
     try:
         total = int(first.get('total') or len(items))
