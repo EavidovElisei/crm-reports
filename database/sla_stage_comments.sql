@@ -11,3 +11,6 @@ CREATE TABLE IF NOT EXISTS sla_stage_comments (
 
 CREATE INDEX IF NOT EXISTS idx_sla_stage_comments_updated_at
     ON sla_stage_comments (updated_at DESC);
+
+-- Права приложению: без GRANT запросы падают с "permission denied for table"
+GRANT SELECT, INSERT, UPDATE, DELETE ON sla_stage_comments TO crm_reports_user;
