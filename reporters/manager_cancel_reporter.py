@@ -89,22 +89,25 @@ def month_label(key, short_year=False):
 # --------------------------------------------------------------------------
 # Данные
 # --------------------------------------------------------------------------
-def load_cancellations(start_dt, end_dt):
-    """Отмены за период: менеджер, месяц отмены, статус, данные заявки."""
+def load_requests(start_dt, end_dt):
+    """Заявки, пришедшие за период: менеджер, месяц создания, статус, данные.
+
+    Считаем по когорте создания: заявка относится к тому месяцу, когда пришла,
+    поэтому знаменатель — все пришедшие заявки менеджера, а не только отмены.
+    """
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
     cur.execute(
         """
         SELECT data->>'callCenterManagerId',
-               to_char(to_timestamp(NULLIF(data->>'cancelledDate', '')::bigint / 1000), 'YYYY-MM'),
+               to_char(to_timestamp((data->>'created')::bigint / 1000), 'YYYY-MM'),
                data->>'status',
                data
         FROM requests
-        WHERE COALESCE(data->>'cancelledDate', '') ~ '^[0-9]+$'
-          AND data->>'status' = ANY(%s)
-          AND to_timestamp(NULLIF(data->>'cancelledDate', '')::bigint / 1000) BETWEEN %s AND %s
+        WHERE (data->>'created') ~ '^[0-9]+$'
+          AND to_timestamp((data->>'created')::bigint / 1000) BETWEEN %s AND %s
         """,
-        (list(CANCELED_STATUSES), start_dt, end_dt),
+        (start_dt, end_dt),
     )
     rows = cur.fetchall()
     cur.close()
@@ -119,38 +122,46 @@ def manager_name(raw):
 
 
 def build_report(start_dt, end_dt):
-    """Причины по каждому менеджеру отдельно для клиента и банка."""
+    """Причины отмен в процентах от всех пришедших заявок менеджера."""
     months = month_keys(start_dt, end_dt)
+    received = defaultdict(Counter)                                  # менеджер → месяц → заявок
     reasons = defaultdict(lambda: defaultdict(lambda: defaultdict(Counter)))
     # reasons[менеджер][тип][месяц][причина] = шт.
-    totals = defaultdict(Counter)   # менеджер → тип/возврат → шт.
+    types = defaultdict(Counter)                                     # менеджер → статус → шт.
 
-    for manager, month, status, data in load_cancellations(start_dt, end_dt):
+    for manager, month, status, data in load_requests(start_dt, end_dt):
         if month not in months:
             continue
         name = manager_name(manager)
-        totals[name][status] += 1
+        received[name][month] += 1
+        if status not in CANCELED_STATUSES:
+            continue
+        types[name][status] += 1
         kind = next((k for k, _t, s, _l in KINDS if s == status), None)
         if kind is None:
             continue   # возвраты в блоки причин не идут
         reasons[name][kind][month][classify(get_last_comment_plain(data) or '')] += 1
 
     result = []
-    for name, per_kind in reasons.items():
+    for name in received:
         blocks = []
         for kind, title, _status, source in KINDS:
             by_month = {
-                month: sum(per_kind[kind][month].values()) for month in months
+                month: sum(reasons[name][kind][month].values()) for month in months
             }
             rows = []
             for reason in sorted(
-                {reason for month in months for reason in per_kind[kind][month]},
-                key=lambda r: -sum(per_kind[kind][m][r] for m in months),
+                {reason for month in months for reason in reasons[name][kind][month]},
+                key=lambda r: -sum(reasons[name][kind][m][r] for m in months),
             ):
                 rows.append({
                     'reason': reason,
-                    'count': {m: per_kind[kind][m][reason] for m in months},
-                    'pct': {m: percent(per_kind[kind][m][reason], by_month[m]) for m in months},
+                    'count': {m: reasons[name][kind][m][reason] for m in months},
+                    # процент от всех пришедших заявок месяца
+                    'pct': {
+                        m: percent(reasons[name][kind][m][reason], received[name][m])
+                        for m in months
+                    },
                 })
             blocks.append({
                 'kind': kind,
@@ -160,13 +171,17 @@ def build_report(start_dt, end_dt):
                 'total': sum(by_month.values()),
                 'rows': rows,
             })
+        total_canceled = sum(types[name].values())
         result.append({
             'name': name,
             'blocks': blocks,
-            'types': totals[name],
-            'total': sum(totals[name].values()),
+            'types': types[name],
+            'received': {m: received[name][m] for m in months},
+            'received_total': sum(received[name][m] for m in months),
+            'total': total_canceled,
+            'pct_total': percent(total_canceled, sum(received[name][m] for m in months)),
         })
-    result.sort(key=lambda item: -item['total'])
+    result.sort(key=lambda item: -item['received_total'])
     return result, months
 
 
@@ -196,16 +211,23 @@ def render_html(report, months, start_dt, end_dt):
 
     summary_rows = []
     for item in report:
-        cells = ''.join(
-            f'<td>{(item["blocks"][0]["by_month"][m] + item["blocks"][1]["by_month"][m]) or "—"}</td>'
-            for m in months
-        )
+        cells = []
+        for m in months:
+            got = item['received'][m]
+            canceled = sum(block['by_month'][m] for block in item['blocks'])
+            if not got:
+                cells.append('<td class="muted">—</td>')
+                continue
+            cells.append(
+                f'<td><span class="apps">{got}</span>'
+                f'<span class="sub2">{canceled} отм. · {percent(canceled, got):.0f}%</span></td>'
+            )
         summary_rows.append(
-            f'<tr><td>{html.escape(item["name"])}</td>{cells}'
-            f'<td class="total">{item["total"]}</td>'
+            f'<tr><td>{html.escape(item["name"])}</td>{"" .join(cells)}'
+            f'<td class="total">{item["received_total"]}</td>'
             f'<td>{item["types"].get("CANCELED_BY_CLIENT") or "—"}</td>'
             f'<td>{item["types"].get("CANCELED_BY_BANK") or "—"}</td>'
-            f'<td>{item["types"].get("REFUND") or "—"}</td></tr>'
+            f'<td class="total">{item["total"]} · {item["pct_total"]:.0f}%</td></tr>'
         )
 
     cards = []
@@ -228,14 +250,20 @@ def render_html(report, months, start_dt, end_dt):
             footer = ''.join(
                 f'<td>{block["by_month"][m] or 0}</td>' for m in months
             )
+            share = ''.join(
+                f'<td>{percent(block["by_month"][m], item["received"][m]):.0f}%</td>'
+                for m in months
+            )
             blocks_html.append(f'''
             <div class="block">
                 <h3>{html.escape(block['title'])}
-                    <small>{html.escape(block['source'])} · всего {block['total']}</small></h3>
+                    <small>{html.escape(block['source'])} · {block['total']} из {item['received_total']} заявок
+                        ({percent(block['total'], item['received_total']):.0f}%)</small></h3>
                 <table class="reasons">
                     <thead><tr><th>Причина</th>{month_headers}</tr></thead>
                     <tbody>{body}
                         <tr class="footer"><td>Всего отмен, шт.</td>{footer}</tr>
+                        <tr class="footer share"><td>Доля от всех заявок месяца</td>{share}</tr>
                     </tbody>
                 </table>
             </div>''')
@@ -244,10 +272,8 @@ def render_html(report, months, start_dt, end_dt):
         <section class="card manager">
             <div class="card-head">
                 <h2>{html.escape(item['name'])}</h2>
-                <span class="count">Всего отмен: {item['total']}
-                    (клиент {item['types'].get('CANCELED_BY_CLIENT') or 0},
-                    банк {item['types'].get('CANCELED_BY_BANK') or 0},
-                    возврат {item['types'].get('REFUND') or 0})</span>
+                <span class="count">Заявок за период: {item['received_total']} ·
+                    отмен {item['total']} ({item['pct_total']:.0f}%)</span>
             </div>
             {''.join(blocks_html)}
         </section>''')
@@ -297,6 +323,9 @@ def render_html(report, months, start_dt, end_dt):
     tbody td:not(:first-child), thead th:not(:first-child) {{ width:17%; }}
     tr.footer td {{ font-weight:700; color:#3a4a46; border-bottom:none; }}
     .pct {{ font-weight:600; }}
+    .apps {{ font-weight:600; }}
+    .sub2 {{ display:block; color:var(--muted); font-size:11px; margin-top:2px; }}
+    tr.share td {{ font-weight:600; color:#4a5a56; background:#fbfcfc; }}
     .qty {{ color:var(--muted); font-size:12px; margin-left:4px; }}
     td.muted {{ color:#c3ccc9; }}
     .summary table tbody td:first-child {{ font-weight:600; }}
@@ -331,18 +360,20 @@ def render_html(report, months, start_dt, end_dt):
             <span class="count">Всего за период: {sum(i['total'] for i in report)}</span>
         </div>
         <table>
-            <thead><tr><th>Менеджер</th>{month_headers}<th>Итого</th>
-                <th>Клиент</th><th>Банк</th><th>Возврат</th></tr></thead>
+            <thead><tr><th>Менеджер</th>{month_headers}<th>Заявок</th>
+                <th>Отмен клиентом</th><th>Отмен банком</th><th>Отмен всего</th></tr></thead>
             <tbody>{''.join(summary_rows)}</tbody>
         </table>
     </section>
     {''.join(cards)}
-    <p class="note">Отмены клиентом и отмены банком — это разные процессы, поэтому у них
-        отдельные таблицы причин. «Отмены клиентом» — наши причины, их фиксируем мы;
-        «Отмены банком» — причина приходит со стороны банка, и она заметно чаще
-        остаётся незаполненной. В каждой ячейке: доля от отмен этого типа за месяц
-        и количество через «·». Возвраты считаются отдельно и в таблицы причин не входят.
-        При малом числе отмен проценты шумят — смотрите количество.</p>
+    <p class="note">Все проценты считаются от общего числа пришедших заявок менеджера
+        в этом месяце, а не от числа отмен. Заявка относится к месяцу, когда пришла;
+        причина — та, что зафиксирована при отмене (даже если отменили позже).
+        В ячейке: доля от пришедших заявок и количество штук через «·».
+        В сводке под числом заявок — сколько из них отменено и какой это процент.
+        Отмены клиентом и отмены банком — разные процессы, поэтому отдельные таблицы;
+        «Отмены банком» заметно чаще остаются без причины. Возвраты в таблицы причин
+        не входят, но учтены в колонке «Отмен всего».</p>
 </main>
 <script>
     document.getElementById('export-xlsx').addEventListener('click', function () {{
@@ -358,7 +389,7 @@ def render_html(report, months, start_dt, end_dt):
 
 
 def build_xlsx(report, months, start_dt, end_dt):
-    """Excel: по листу на каждый блок (клиент / банк), процент и количество."""
+    """Excel: лист на каждый блок (клиент / банк), проценты от всех заявок."""
     wb = Workbook()
     wb.remove(wb.active)
     same_year = len({m.split('-')[0] for m in months}) == 1
@@ -366,10 +397,9 @@ def build_xlsx(report, months, start_dt, end_dt):
 
     header = (
         ['Менеджер', 'Причина']
-        + [f'{m}, %' for m in month_names]
+        + [f'{m}, % от заявок' for m in month_names]
         + [f'{m}, шт.' for m in month_names]
-        + [f'{m} всего, шт.' for m in month_names]
-        + ['Всего, шт.']
+        + ['Всего, шт.', '% от всех заявок менеджера']
     )
     grey = PatternFill('solid', fgColor='F2F5F4')
 
@@ -389,31 +419,34 @@ def build_xlsx(report, months, start_dt, end_dt):
                     [item['name'], row['reason']]
                     + [round(row['pct'][m] / 100, 4) for m in months]
                     + [row['count'][m] for m in months]
-                    + [block['by_month'][m] for m in months]
-                    + [sum(row['count'].values())]
+                    + [sum(row['count'].values()),
+                       round(percent(sum(row['count'].values()), item['received_total']) / 100, 4)]
                 )
             ws.append(
                 [item['name'], 'Всего отмен, шт.']
-                + [None] * len(months)
+                + [round(percent(block['by_month'][m], item['received'][m]) / 100, 4) for m in months]
                 + [block['by_month'][m] for m in months]
-                + [block['by_month'][m] for m in months]
-                + [block['total']]
+                + [block['total'],
+                   round(percent(block['total'], item['received_total']) / 100, 4)]
             )
             for cell in ws[ws.max_row]:
                 cell.font = Font(bold=True)
                 cell.fill = grey
 
-        pct_from = 3
-        pct_to = 2 + len(months)
-        for row in ws.iter_rows(min_row=2, min_col=pct_from, max_col=pct_to):
-            for cell in row:
-                if isinstance(cell.value, (int, float)):
-                    cell.number_format = '0.0%'
-            if str(ws.cell(row[0].row, 2).value or '').startswith('Всего отмен'):
-                for cell in row:
-                    cell.number_format = 'General'
+        # в строке «Всего» процент остаётся процентом, штуки — числом
+        for row_index in range(2, ws.max_row + 1):
+            is_total = str(ws.cell(row_index, 2).value or '').startswith('Всего отмен')
+            for col in range(3, 3 + len(months)):
+                ws.cell(row_index, col).number_format = '0.0%'
+            for col in range(3 + len(months), 3 + 2 * len(months)):
+                ws.cell(row_index, col).number_format = '0'
+            last = 3 + 2 * len(months)
+            ws.cell(row_index, last).number_format = '0'
+            ws.cell(row_index, last + 1).number_format = '0.0%'
+            if is_total:
+                pass
 
-        widths = [16, 32] + [10] * (len(months) * 3) + [11]
+        widths = [16, 32] + [13] * len(months) + [10] * len(months) + [11, 15]
         for index, width in enumerate(widths, start=1):
             ws.column_dimensions[chr(64 + index)].width = width
         ws.freeze_panes = 'C2'
