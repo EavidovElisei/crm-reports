@@ -57,7 +57,7 @@ def classify(text):
 
     if not low:
         return NO_REASON
-    if re.fullmatch(r'[.\-+_ ]*', low):
+    if re.fullmatch(r'[.\-+_ ]*', low) or re.fullmatch(r'\d{1,3}', low):
         return EMPTY
     if low.startswith('#') or 'za-' in low or 'ac-' in low or 'awap' in low:
         return NO_REASON
@@ -71,6 +71,7 @@ def classify(text):
     if (
         'пейкипер' in low or 'paykeeper' in low or 'life pay' in low
         or 'другой банк' in low or 'партнер' in low or 'партнёр' in low
+        or low in ('lp', 'на лп', 'лп', 'life pay')
     ):
         return 'Ушёл к партнёру'
     if 'терминал' in low or 'эквайринг' in low:
@@ -81,10 +82,15 @@ def classify(text):
         return 'Расторжение договора (НИБ)'
     if 'информир' in low:
         return 'Некорректное информирование'
-    if 'не нужна' in low or 'не актуаль' in low or 'передумал' in low or 'нет потре' in low:
-        return 'Касса не нужна / передумал'
-    if 'закрытие' in low or 'сезон' in low:
+    if 'закрытие' in low or 'сезон' in low or 'прекращение деят' in low:
         return 'Бизнес закрылся / сезонность'
+    if (
+        'не нужна' in low or 'не актуаль' in low or 'передумал' in low
+        or 'нет потре' in low or 'клиент отказал' in low or 'отказывается' in low
+        or 'касса не подходит' in low or 'более не требуется' in low
+        or 'не требуется' in low or 'изменились условия' in low
+    ):
+        return 'Касса не нужна / передумал'
     if 'доставк' in low or 'срок' in low:
         return 'Сроки доставки'
     return 'Прочее'

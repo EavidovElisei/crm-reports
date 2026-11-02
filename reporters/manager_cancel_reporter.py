@@ -2,12 +2,15 @@
 """
 Причины отмен заявок по менеджерам: динамика по месяцам.
 
-Страница /managers/cancel показывает по каждому менеджеру таблицу
-«Причина → доля отмен в месяце», а сверху — сводку по объёму заявок
-и проценту отмен, чтобы было видно: выросли отмены в штуках
-или выросла их доля.
+Отмены разделены на два независимых блока, потому что это разные процессы
+и разные источники причины:
+  • отмены клиентом  (CANCELED_BY_CLIENT) — наши причины, их фиксируем мы;
+  • отмены банком    (CANCELED_BY_BANK)   — причины приходят со стороны банка.
 
-Отмена относится к месяцу по дате отмены (cancelledDate), а не создания.
+Возвраты (REFUND) считаются отдельно и в блоки причин не попадают.
+
+Отмена относится к месяцу по дате отмены (cancelledDate).
+В таблицах рядом с процентом стоит количество: «40% · 23».
 """
 import html
 import io
@@ -20,15 +23,18 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 
 from config import DB_CONFIG, MANAGER_NAMES
-from lib.cancel_reasons import classify, percent, reason_rows
+from lib.cancel_reasons import classify, percent
 from last_comment import get_last_comment_plain
 
 app = Flask(__name__)
 
-CANCELED_STATUSES = ('CANCELED_BY_CLIENT', 'CANCELED_BY_BANK', 'REFUND')
-IN_PROGRESS_STATUSES = (
-    'NEW', 'DRAFT', 'INCOME_CREATED', 'INCOME_PAID', 'INCOME_PARTIALLY_PAID', 'KKT_LINKED',
-)
+# Блоки отчёта: ключ → (заголовок, статус CRM, подпись источника)
+KINDS = [
+    ('client', 'Отмены клиентом', 'CANCELED_BY_CLIENT', 'наши причины'),
+    ('bank', 'Отмены банком', 'CANCELED_BY_BANK', 'причины банка'),
+]
+REFUND_STATUS = 'REFUND'
+CANCELED_STATUSES = tuple(status for _k, _t, status, _s in KINDS) + (REFUND_STATUS,)
 
 MONTH_NAMES = [
     'Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь',
@@ -84,13 +90,14 @@ def month_label(key, short_year=False):
 # Данные
 # --------------------------------------------------------------------------
 def load_cancellations(start_dt, end_dt):
-    """Отмены за период: менеджер, месяц отмены, причина."""
+    """Отмены за период: менеджер, месяц отмены, статус, данные заявки."""
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
     cur.execute(
         """
         SELECT data->>'callCenterManagerId',
                to_char(to_timestamp(NULLIF(data->>'cancelledDate', '')::bigint / 1000), 'YYYY-MM'),
+               data->>'status',
                data
         FROM requests
         WHERE COALESCE(data->>'cancelledDate', '') ~ '^[0-9]+$'
@@ -112,38 +119,55 @@ def manager_name(raw):
 
 
 def build_report(start_dt, end_dt):
-    """Сводка по менеджерам + таблицы причин по месяцам."""
+    """Причины по каждому менеджеру отдельно для клиента и банка."""
     months = month_keys(start_dt, end_dt)
-    cancellations = load_cancellations(start_dt, end_dt)
+    reasons = defaultdict(lambda: defaultdict(lambda: defaultdict(Counter)))
+    # reasons[менеджер][тип][месяц][причина] = шт.
+    totals = defaultdict(Counter)   # менеджер → тип/возврат → шт.
 
-    reasons = defaultdict(lambda: defaultdict(Counter))   # менеджер → месяц → причина
-    for manager, month, data in cancellations:
+    for manager, month, status, data in load_cancellations(start_dt, end_dt):
         if month not in months:
             continue
-        reasons[manager_name(manager)][month][classify(get_last_comment_plain(data) or '')] += 1
+        name = manager_name(manager)
+        totals[name][status] += 1
+        kind = next((k for k, _t, s, _l in KINDS if s == status), None)
+        if kind is None:
+            continue   # возвраты в блоки причин не идут
+        reasons[name][kind][month][classify(get_last_comment_plain(data) or '')] += 1
 
-    totals = {month: sum(sum(per_month[month].values()) for per_month in reasons.values()) for month in months}
     result = []
-    for name, per_month in reasons.items():
-        by_month = {month: sum(per_month[month].values()) for month in months}
-        rows = []
-        for reason in sorted(
-            {reason for month in months for reason in per_month[month]},
-            key=lambda r: -sum(per_month[m][r] for m in months),
-        ):
-            rows.append({
-                'reason': reason,
-                'pct': {m: percent(per_month[m][reason], by_month[m]) for m in months},
-                'count': {m: per_month[m][reason] for m in months},
+    for name, per_kind in reasons.items():
+        blocks = []
+        for kind, title, _status, source in KINDS:
+            by_month = {
+                month: sum(per_kind[kind][month].values()) for month in months
+            }
+            rows = []
+            for reason in sorted(
+                {reason for month in months for reason in per_kind[kind][month]},
+                key=lambda r: -sum(per_kind[kind][m][r] for m in months),
+            ):
+                rows.append({
+                    'reason': reason,
+                    'count': {m: per_kind[kind][m][reason] for m in months},
+                    'pct': {m: percent(per_kind[kind][m][reason], by_month[m]) for m in months},
+                })
+            blocks.append({
+                'kind': kind,
+                'title': title,
+                'source': source,
+                'by_month': by_month,
+                'total': sum(by_month.values()),
+                'rows': rows,
             })
         result.append({
             'name': name,
-            'by_month': by_month,
-            'total': sum(by_month.values()),
-            'reasons': rows,
+            'blocks': blocks,
+            'types': totals[name],
+            'total': sum(totals[name].values()),
         })
     result.sort(key=lambda item: -item['total'])
-    return result, months, totals
+    return result, months
 
 
 # --------------------------------------------------------------------------
@@ -153,7 +177,18 @@ def format_iso(value):
     return value.strftime('%Y-%m-%d')
 
 
-def render_html(report, months, totals, start_dt, end_dt):
+def cell_html(row, month):
+    """Ячейка: процент и количество — «40% · 23»."""
+    count = row['count'][month]
+    if not count:
+        return '<td class="muted">—</td>'
+    return (
+        f'<td><span class="pct">{row["pct"][month]:.0f}%</span>'
+        f'<span class="qty">· {count}</span></td>'
+    )
+
+
+def render_html(report, months, start_dt, end_dt):
     same_year = len({m.split('-')[0] for m in months}) == 1
     month_headers = ''.join(
         f'<th>{html.escape(month_label(m, same_year))}</th>' for m in months
@@ -161,35 +196,60 @@ def render_html(report, months, totals, start_dt, end_dt):
 
     summary_rows = []
     for item in report:
-        cells = ''.join(f'<td>{item["by_month"][m] or "—"}</td>' for m in months)
+        cells = ''.join(
+            f'<td>{(item["blocks"][0]["by_month"][m] + item["blocks"][1]["by_month"][m]) or "—"}</td>'
+            for m in months
+        )
         summary_rows.append(
             f'<tr><td>{html.escape(item["name"])}</td>{cells}'
-            f'<td class="total">{item["total"]}</td></tr>'
+            f'<td class="total">{item["total"]}</td>'
+            f'<td>{item["types"].get("CANCELED_BY_CLIENT") or "—"}</td>'
+            f'<td>{item["types"].get("CANCELED_BY_BANK") or "—"}</td>'
+            f'<td>{item["types"].get("REFUND") or "—"}</td></tr>'
         )
 
     cards = []
     for item in report:
-        body = []
-        for row in item['reasons']:
-            cells = ''.join(
-                f'<td>{row["pct"][m]:.0f}%</td>' if row['count'][m] else '<td class="muted">—</td>'
-                for m in months
+        blocks_html = []
+        for block in item['blocks']:
+            if not block['rows']:
+                blocks_html.append(
+                    f'<div class="block"><h3>{html.escape(block["title"])}'
+                    f'<small>{html.escape(block["source"])}</small></h3>'
+                    f'<p class="empty">Отмен этого типа не было</p></div>'
+                )
+                continue
+            body = ''.join(
+                f'<tr><td>{html.escape(row["reason"])}</td>'
+                + ''.join(cell_html(row, m) for m in months)
+                + '</tr>'
+                for row in block['rows']
             )
-            body.append(f'<tr><td>{html.escape(row["reason"])}</td>{cells}</tr>')
-        footer = ''.join(f'<td>{item["by_month"][m] or 0}</td>' for m in months)
-        breakdown = ' / '.join(str(item['by_month'][m] or 0) for m in months)
+            footer = ''.join(
+                f'<td>{block["by_month"][m] or 0}</td>' for m in months
+            )
+            blocks_html.append(f'''
+            <div class="block">
+                <h3>{html.escape(block['title'])}
+                    <small>{html.escape(block['source'])} · всего {block['total']}</small></h3>
+                <table class="reasons">
+                    <thead><tr><th>Причина</th>{month_headers}</tr></thead>
+                    <tbody>{body}
+                        <tr class="footer"><td>Всего отмен, шт.</td>{footer}</tr>
+                    </tbody>
+                </table>
+            </div>''')
+
         cards.append(f'''
-        <section class="card">
+        <section class="card manager">
             <div class="card-head">
                 <h2>{html.escape(item['name'])}</h2>
-                <span class="count">Отмен: {item['total']} ({breakdown})</span>
+                <span class="count">Всего отмен: {item['total']}
+                    (клиент {item['types'].get('CANCELED_BY_CLIENT') or 0},
+                    банк {item['types'].get('CANCELED_BY_BANK') or 0},
+                    возврат {item['types'].get('REFUND') or 0})</span>
             </div>
-            <table class="reasons">
-                <thead><tr><th>Причина</th>{month_headers}</tr></thead>
-                <tbody>{''.join(body)}
-                    <tr class="footer"><td>Всего отмен, шт.</td>{footer}</tr>
-                </tbody>
-            </table>
+            {''.join(blocks_html)}
         </section>''')
 
     return f'''<!DOCTYPE html>
@@ -226,16 +286,21 @@ def render_html(report, months, totals, start_dt, end_dt):
     .card-head {{ display:flex; justify-content:space-between; align-items:baseline;
         gap:12px; margin-bottom:12px; flex-wrap:wrap; }}
     h2 {{ margin:0; font-size:17px; }}
+    h3 {{ margin:18px 0 8px; font-size:14px; color:#2a3a36; display:flex; gap:8px;
+        align-items:baseline; flex-wrap:wrap; }}
+    h3 small {{ font-weight:400; color:var(--muted); font-size:12px; }}
     .count {{ font-size:12px; color:var(--muted); }}
     table {{ width:100%; border-collapse:collapse; font-size:14px; }}
     thead th {{ text-align:left; padding:10px 12px; color:#6b7a76; font-weight:600;
         border-bottom:1px solid var(--line); background:#f7f9f8; }}
-    tbody td {{ padding:11px 12px; border-bottom:1px solid #f0f3f2; }}
-    tbody td:not(:first-child), thead th:not(:first-child) {{ width:16%; text-align:left; }}
+    tbody td {{ padding:10px 12px; border-bottom:1px solid #f0f3f2; }}
+    tbody td:not(:first-child), thead th:not(:first-child) {{ width:17%; }}
     tr.footer td {{ font-weight:700; color:#3a4a46; border-bottom:none; }}
+    .pct {{ font-weight:600; }}
+    .qty {{ color:var(--muted); font-size:12px; margin-left:4px; }}
     td.muted {{ color:#c3ccc9; }}
     .summary table tbody td:first-child {{ font-weight:600; }}
-    .summary td.total {{ font-weight:700; }}
+    .empty {{ color:var(--muted); font-size:13px; margin:6px 0 0; }}
     .note {{ margin:0 2px; color:var(--muted); font-size:12px; line-height:1.6; }}
 </style>
 </head>
@@ -263,18 +328,21 @@ def render_html(report, months, totals, start_dt, end_dt):
     <section class="card summary">
         <div class="card-head">
             <h2>Сколько отмен у каждого менеджера</h2>
-            <span class="count">Всего отмен за период: {sum(totals.values())}</span>
+            <span class="count">Всего за период: {sum(i['total'] for i in report)}</span>
         </div>
         <table>
-            <thead><tr><th>Менеджер</th>{month_headers}<th>Итого</th></tr></thead>
+            <thead><tr><th>Менеджер</th>{month_headers}<th>Итого</th>
+                <th>Клиент</th><th>Банк</th><th>Возврат</th></tr></thead>
             <tbody>{''.join(summary_rows)}</tbody>
         </table>
     </section>
     {''.join(cards)}
-    <p class="note">Доли считаются от числа отмен этого менеджера в этом месяце — по строке сумма 100%.
-        Причина берётся из комментария к отмене в CRM: если в нём только номер тикета
-        или «Отказ клиента» без пояснения, причина попадает в «Причина не указана».
-        При малом числе отмен проценты шумят — смотрите строку «Всего отмен, шт.».</p>
+    <p class="note">Отмены клиентом и отмены банком — это разные процессы, поэтому у них
+        отдельные таблицы причин. «Отмены клиентом» — наши причины, их фиксируем мы;
+        «Отмены банком» — причина приходит со стороны банка, и она заметно чаще
+        остаётся незаполненной. В каждой ячейке: доля от отмен этого типа за месяц
+        и количество через «·». Возвраты считаются отдельно и в таблицы причин не входят.
+        При малом числе отмен проценты шумят — смотрите количество.</p>
 </main>
 <script>
     document.getElementById('export-xlsx').addEventListener('click', function () {{
@@ -290,46 +358,65 @@ def render_html(report, months, totals, start_dt, end_dt):
 
 
 def build_xlsx(report, months, start_dt, end_dt):
+    """Excel: по листу на каждый блок (клиент / банк), процент и количество."""
     wb = Workbook()
-    ws = wb.active
-    ws.title = 'Причины отмен'
-
+    wb.remove(wb.active)
     same_year = len({m.split('-')[0] for m in months}) == 1
-    header = (['Менеджер', 'Причина']
-              + [month_label(m, same_year) for m in months] + ['Всего, шт.'])
-    ws.append(header)
-    for cell in ws[1]:
-        cell.font = Font(bold=True)
-        cell.alignment = Alignment(wrap_text=True, vertical='center')
+    month_names = [month_label(m, same_year) for m in months]
 
+    header = (
+        ['Менеджер', 'Причина']
+        + [f'{m}, %' for m in month_names]
+        + [f'{m}, шт.' for m in month_names]
+        + [f'{m} всего, шт.' for m in month_names]
+        + ['Всего, шт.']
+    )
     grey = PatternFill('solid', fgColor='F2F5F4')
-    for item in report:
-        for row in item['reasons']:
-            ws.append(
-                [item['name'], row['reason']]
-                + [round(row['pct'][m] / 100, 4) for m in months]
-                + [sum(row['count'].values())]
-            )
-        total_row = ['', 'Всего отмен, шт.'] + [item['by_month'][m] for m in months] + [item['total']]
-        ws.append(total_row)
-        for cell in ws[ws.max_row]:
+
+    for kind, title, _status, _source in KINDS:
+        ws = wb.create_sheet(title)
+        ws.append(header)
+        for cell in ws[1]:
             cell.font = Font(bold=True)
-            cell.fill = grey
+            cell.alignment = Alignment(wrap_text=True, vertical='center')
 
-    for row in ws.iter_rows(min_row=2, min_col=3, max_col=2 + len(months)):
-        for cell in row:
-            if isinstance(cell.value, (int, float)):
-                cell.number_format = '0.0%' if cell.column <= 2 + len(months) and cell.row <= ws.max_row else '0'
-    # проценты — только в строках причин, в строке «Всего» остаются штуки
-    for r in range(2, ws.max_row + 1):
-        if str(ws.cell(r, 2).value or '').startswith('Всего отмен'):
-            for c in range(3, 3 + len(months)):
-                ws.cell(r, c).number_format = '0'
+        for item in report:
+            block = next(b for b in item['blocks'] if b['kind'] == kind)
+            if not block['rows']:
+                continue
+            for row in block['rows']:
+                ws.append(
+                    [item['name'], row['reason']]
+                    + [round(row['pct'][m] / 100, 4) for m in months]
+                    + [row['count'][m] for m in months]
+                    + [block['by_month'][m] for m in months]
+                    + [sum(row['count'].values())]
+                )
+            ws.append(
+                [item['name'], 'Всего отмен, шт.']
+                + [None] * len(months)
+                + [block['by_month'][m] for m in months]
+                + [block['by_month'][m] for m in months]
+                + [block['total']]
+            )
+            for cell in ws[ws.max_row]:
+                cell.font = Font(bold=True)
+                cell.fill = grey
 
-    widths = [18, 34] + [14] * len(months) + [12]
-    for index, width in enumerate(widths, start=1):
-        ws.column_dimensions[chr(64 + index) if index <= 26 else 'A'].width = width
-    ws.freeze_panes = 'C2'
+        pct_from = 3
+        pct_to = 2 + len(months)
+        for row in ws.iter_rows(min_row=2, min_col=pct_from, max_col=pct_to):
+            for cell in row:
+                if isinstance(cell.value, (int, float)):
+                    cell.number_format = '0.0%'
+            if str(ws.cell(row[0].row, 2).value or '').startswith('Всего отмен'):
+                for cell in row:
+                    cell.number_format = 'General'
+
+        widths = [16, 32] + [10] * (len(months) * 3) + [11]
+        for index, width in enumerate(widths, start=1):
+            ws.column_dimensions[chr(64 + index)].width = width
+        ws.freeze_panes = 'C2'
 
     output = io.BytesIO()
     wb.save(output)
@@ -342,7 +429,7 @@ def managers_cancel_page():
     """Причины отмен по менеджерам с динамикой по месяцам."""
     start_dt, end_dt = parse_period()
     try:
-        report, months, totals = build_report(start_dt, end_dt)
+        report, months = build_report(start_dt, end_dt)
     except Exception as exc:
         return Response(
             f'<h1>Ошибка расчёта отмен</h1><pre>{html.escape(str(exc))}</pre>',
@@ -350,16 +437,16 @@ def managers_cancel_page():
             mimetype='text/html; charset=utf-8',
         ), 500
     return Response(
-        render_html(report, months, totals, start_dt, end_dt),
+        render_html(report, months, start_dt, end_dt),
         mimetype='text/html; charset=utf-8',
     )
 
 
 @app.route('/managers/cancel/export')
 def managers_cancel_export():
-    """Excel с причинами отмен по менеджерам."""
+    """Excel с причинами отмен по менеджерам (листы «клиент» и «банк»)."""
     start_dt, end_dt = parse_period()
-    report, months, _totals = build_report(start_dt, end_dt)
+    report, months = build_report(start_dt, end_dt)
     output = build_xlsx(report, months, start_dt, end_dt)
     filename = f'otmeny_{format_iso(start_dt)}_{format_iso(end_dt)}.xlsx'
     return Response(
