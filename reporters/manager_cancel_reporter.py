@@ -230,6 +230,31 @@ def render_html(report, months, start_dt, end_dt):
             f'<td class="total">{item["total"]} · {item["pct_total"]:.0f}%</td></tr>'
         )
 
+    # итоговая строка: сколько заявок и отмен всего в каждом месяце
+    totals_cells = []
+    for m in months:
+        got = sum(item['received'][m] for item in report)
+        canceled = sum(
+            block['by_month'][m] for item in report for block in item['blocks']
+        )
+        if not got:
+            totals_cells.append('<td class="muted">—</td>')
+            continue
+        totals_cells.append(
+            f'<td><span class="apps">{got}</span>'
+            f'<span class="sub2">{canceled} отм. · {percent(canceled, got):.0f}%</span></td>'
+        )
+    total_received = sum(item['received_total'] for item in report)
+    total_client = sum(item['types'].get('CANCELED_BY_CLIENT', 0) for item in report)
+    total_bank = sum(item['types'].get('CANCELED_BY_BANK', 0) for item in report)
+    total_all = sum(item['total'] for item in report)
+    summary_rows.append(
+        f'<tr class="totals"><td>Итого</td>{"".join(totals_cells)}'
+        f'<td class="total">{total_received}</td>'
+        f'<td>{total_client}</td><td>{total_bank}</td>'
+        f'<td class="total">{total_all} · {percent(total_all, total_received):.0f}%</td></tr>'
+    )
+
     cards = []
     for item in report:
         blocks_html = []
@@ -329,6 +354,8 @@ def render_html(report, months, start_dt, end_dt):
     .qty {{ color:var(--muted); font-size:12px; margin-left:4px; }}
     td.muted {{ color:#c3ccc9; }}
     .summary table tbody td:first-child {{ font-weight:600; }}
+    tr.totals td {{ background:#f4f7f6; border-top:2px solid var(--line);
+        font-weight:700; color:#22322e; }}
     .empty {{ color:var(--muted); font-size:13px; margin:6px 0 0; }}
     .note {{ margin:0 2px; color:var(--muted); font-size:12px; line-height:1.6; }}
 </style>
